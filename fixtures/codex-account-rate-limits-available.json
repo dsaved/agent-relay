@@ -1,0 +1,16 @@
+{
+  "_comment": "Mocked — the real subscription used for Phase 1A testing was exhausted for the whole session, so this 'available' shape is constructed from the same GetAccountRateLimitsResponse schema, not captured live.",
+  "ordinaryUsageAllowed": true,
+  "rateLimits": {
+    "limitId": "codex",
+    "limitName": null,
+    "normalModelSlug": null,
+    "primary": { "usedPercent": 12, "windowDurationMins": 300, "resetsAt": 1794301401 },
+    "secondary": { "usedPercent": 8, "windowDurationMins": 10080, "resetsAt": 1794765545 },
+    "credits": { "hasCredits": false, "unlimited": false, "balance": "0" },
+    "individualLimit": null,
+    "spendControlReached": false,
+    "planType": "plus",
+    "rateLimitReachedType": null
+  }
+}

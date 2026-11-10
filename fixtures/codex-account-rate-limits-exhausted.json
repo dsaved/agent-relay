@@ -1,0 +1,44 @@
+{
+  "_comment": "Real `account/rateLimits/read` result captured live on 2026-11-10 from this machine's already-exhausted Codex subscription. accountId and the upsell banner's server-rendered copy were stripped; every usage/limit field is unmodified. See docs/FEASIBILITY.md Phase 1A.",
+  "ordinaryUsageAllowed": false,
+  "rateLimits": {
+    "limitId": "codex",
+    "limitName": null,
+    "normalModelSlug": null,
+    "primary": { "usedPercent": 100, "windowDurationMins": 300, "resetsAt": 1794301401 },
+    "secondary": { "usedPercent": 66, "windowDurationMins": 10080, "resetsAt": 1794765545 },
+    "credits": { "hasCredits": false, "unlimited": false, "balance": "0" },
+    "individualLimit": null,
+    "spendControlReached": false,
+    "planType": "plus",
+    "rateLimitReachedType": "rate_limit_reached"
+  },
+  "rateLimitsByLimitId": {
+    "codex": {
+      "limitId": "codex",
+      "limitName": null,
+      "normalModelSlug": null,
+      "primary": { "usedPercent": 100, "windowDurationMins": 300, "resetsAt": 1794301401 },
+      "secondary": { "usedPercent": 66, "windowDurationMins": 10080, "resetsAt": 1794765545 },
+      "credits": { "hasCredits": false, "unlimited": false, "balance": "0" },
+      "individualLimit": null,
+      "spendControlReached": false,
+      "planType": "plus",
+      "rateLimitReachedType": "rate_limit_reached"
+    }
+  },
+  "rateLimitResetCredits": {
+    "availableCount": 1,
+    "credits": [
+      {
+        "id": "RateLimitResetCredit_2636b6c9f9f881919ad7131ab9c20f40",
+        "resetType": "codexRateLimits",
+        "status": "available",
+        "grantedAt": 1793569185,
+        "expiresAt": 1796161185,
+        "title": "Full reset (Weekly + 5 hr)",
+        "description": "Thanks for using Codex! You've been granted one free rate limit reset."
+      }
+    ]
+  }
+}
