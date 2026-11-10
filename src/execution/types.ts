@@ -14,6 +14,7 @@ export type ExecutionOutcomeKind =
   | "permission_required"
   | "crashed"
   | "timed_out"
+  | "cancelled"
   | "invalid_output"
   | "unknown_error";
 
@@ -53,6 +54,14 @@ export interface ExecutionRunOptions {
   resumeSessionId?: string;
   timeoutMs?: number;
   maxOutputBytes?: number;
+  /**
+   * Phase 4's cooperative-cancellation path (requirement #5). When this
+   * fires, the run stops exactly like a timeout — the whole process
+   * group is signaled, never just the direct child — except the outcome
+   * is reported as `"cancelled"`, not `"timed_out"`/`"crashed"`, so a
+   * daemon-requested pause/stop is never mistaken for a failure.
+   */
+  signal?: AbortSignal;
 }
 
 /**

@@ -21,6 +21,8 @@ export interface ExecuteHandoffOptions {
   validationCommands?: string[];
   timeoutMs?: number;
   maxOutputBytes?: number;
+  /** Phase 4's cooperative-cancellation path — threaded straight to the destination adapter's `run()`. Nobody passed one before Phase 4; omitting it is identical to today's behavior. */
+  signal?: AbortSignal;
 }
 
 export interface ExecuteHandoffResult {
@@ -212,7 +214,7 @@ export class HandoffEngine {
       const instruction = resumeSessionId ? buildResumeNudge() : buildContinuationInstruction(handoff, objective);
 
       const adapter = this.adapters[options.to];
-      const result = await adapter.run({ cwd: workspacePath, instruction, resumeSessionId, timeoutMs: options.timeoutMs, maxOutputBytes: options.maxOutputBytes });
+      const result = await adapter.run({ cwd: workspacePath, instruction, resumeSessionId, timeoutMs: options.timeoutMs, maxOutputBytes: options.maxOutputBytes, signal: options.signal });
 
       const destinationSessionId = result.sessionId ?? resumeSessionId ?? null;
       let validationResults = null;

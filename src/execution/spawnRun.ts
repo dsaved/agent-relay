@@ -14,6 +14,8 @@ export interface SpawnRunOptions {
   maxOutputBytes?: number;
   /** Extra environment variables to layer on top of a copy of this process's own env — never a blank/unknown env, and never a place to inject secrets this tool doesn't itself hold. */
   env?: Record<string, string>;
+  /** Phase 4's cooperative-cancellation path — see `ExecutionRunOptions.signal`'s doc comment. */
+  signal?: AbortSignal;
 }
 
 export interface SpawnRunResult {
@@ -25,6 +27,10 @@ export interface SpawnRunResult {
   timedOut: boolean;
   outputTruncated: boolean;
   spawnError: Error | null;
+  /** True only when `options.signal` fired and caused the termination — distinct from a timeout or a spawn failure. */
+  cancelled: boolean;
+  /** `options.signal.reason` at the moment it fired, when that was a string (e.g. "pause"/"stop"); null otherwise. */
+  cancelReason: string | null;
 }
 
 /**
@@ -65,8 +71,27 @@ export function spawnRun(options: SpawnRunOptions): Promise<SpawnRunResult> {
     let outputBytes = 0;
     let outputTruncated = false;
     let timedOut = false;
+    let cancelled = false;
+    let cancelReason: string | null = null;
     let settled = false;
     let weInitiatedKill = false;
+
+    // An already-aborted signal (e.g. a pause/stop requested before this
+    // leg even started) must never start a process at all.
+    if (options.signal?.aborted) {
+      resolve({
+        exitCode: null,
+        signal: null,
+        spawnError: null,
+        events: [],
+        stderr: "",
+        outputTruncated: false,
+        timedOut: false,
+        cancelled: true,
+        cancelReason: typeof options.signal.reason === "string" ? options.signal.reason : "cancelled",
+      });
+      return;
+    }
 
     const proc = spawn(options.command, options.args, { cwd: options.cwd, env, stdio: ["ignore", "pipe", "pipe"], detached: true });
 
@@ -76,17 +101,18 @@ export function spawnRun(options: SpawnRunOptions): Promise<SpawnRunResult> {
       else proc.kill(signal);
     };
 
-    const finish = (result: Omit<SpawnRunResult, "events" | "stderr" | "outputTruncated" | "timedOut">) => {
+    const finish = (result: Omit<SpawnRunResult, "events" | "stderr" | "outputTruncated" | "timedOut" | "cancelled" | "cancelReason">) => {
       if (settled) return;
       settled = true;
       clearTimeout(timeoutHandle);
+      options.signal?.removeEventListener("abort", onAbort);
       // Belt-and-suspenders: if we're the reason this process ended, make
       // one more pass at the whole group before declaring it stopped —
       // the direct child reporting "exited" doesn't guarantee a
       // descendant that escaped the group did too, but this catches the
       // common case of stragglers still inside it.
       if (weInitiatedKill && typeof proc.pid === "number") killGroup(proc.pid, "SIGKILL");
-      resolve({ ...result, events, stderr, outputTruncated, timedOut });
+      resolve({ ...result, events, stderr, outputTruncated, timedOut, cancelled, cancelReason });
     };
 
     const timeoutHandle = setTimeout(() => {
@@ -96,6 +122,20 @@ export function spawnRun(options: SpawnRunOptions): Promise<SpawnRunResult> {
         if (!settled) terminate("SIGKILL");
       }, KILL_GRACE_MS);
     }, timeoutMs);
+
+    // Same shape as the timeout path (SIGTERM, then SIGKILL after a grace
+    // period) — the only difference is what caused it, reported via
+    // `cancelled`/`cancelReason` rather than `timedOut`, so a daemon's
+    // requested pause/stop is never misreported as a crash or a timeout.
+    const onAbort = () => {
+      cancelled = true;
+      cancelReason = typeof options.signal?.reason === "string" ? options.signal.reason : "cancelled";
+      terminate("SIGTERM");
+      setTimeout(() => {
+        if (!settled) terminate("SIGKILL");
+      }, KILL_GRACE_MS);
+    };
+    options.signal?.addEventListener("abort", onAbort);
 
     proc.once("error", (err) => finish({ exitCode: null, signal: null, spawnError: err }));
 

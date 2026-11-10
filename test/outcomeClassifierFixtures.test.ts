@@ -16,7 +16,7 @@ function loadEvents(name: string): ExecutionEvent[] {
 }
 
 function spawnResult(events: ExecutionEvent[], overrides: Partial<SpawnRunResult> = {}): SpawnRunResult {
-  return { exitCode: 0, signal: null, events, stderr: "", timedOut: false, outputTruncated: false, spawnError: null, ...overrides };
+  return { exitCode: 0, signal: null, events, stderr: "", timedOut: false, outputTruncated: false, spawnError: null, cancelled: false, cancelReason: null, ...overrides };
 }
 
 test("interpretCodexRun on the real exec --json usage-limit capture (Phase 0) classifies as rate_limited", () => {

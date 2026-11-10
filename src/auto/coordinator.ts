@@ -13,7 +13,7 @@ import { otherProvider, selectAlternativeProvider } from "./providerSelection.js
 import { getOrCreateNextLegHandoff } from "./followOnHandoff.js";
 import type { AutoState, AutoTaskState, AutoTransition } from "./types.js";
 
-const TERMINAL_STATES = new Set<AutoState>(["completed", "failed"]);
+const TERMINAL_STATES = new Set<AutoState>(["completed", "failed", "stopped"]);
 const PAUSED_STATES = new Set<AutoState>(["paused_exhausted", "paused_approval"]);
 
 export interface StartAutoTaskOptions {
@@ -26,6 +26,8 @@ export interface StartAutoTaskOptions {
   maxAttempts?: number;
   maxRuntimeMs?: number;
   pinnedProvider?: SessionProvider | null;
+  /** Phase 4's cooperative-cancellation path — a daemon-held `AbortController.signal`, checked right before and threaded into the destination adapter's `run()`. Omitting it (every Phase 0-3B caller) is identical to today's behavior. */
+  signal?: AbortSignal;
 }
 
 export interface AutomaticHandoffCoordinatorDeps {
@@ -97,10 +99,26 @@ export class AutomaticHandoffCoordinator {
    * "permitted by policy" check, not this method).
    */
   async start(taskId: string, options: StartAutoTaskOptions = {}): Promise<AutoTaskState> {
+    const { state, settled } = await this.prepareStart(taskId, options);
+    return settled ? state : this.continueFrom(state, options);
+  }
+
+  /**
+   * Phase 4's non-blocking submission path (requirement #4): does exactly
+   * the synchronous "load-or-create, then durably persist" half of
+   * `start()` and returns — `settled: true` means there is nothing left
+   * to run (already completed/failed/paused), `settled: false` means the
+   * caller should run `continueFrom(state, options)`, which a daemon's
+   * scheduler can do without awaiting it. This is a pure decomposition of
+   * `start()`'s own existing logic, not new orchestration — `start()`
+   * itself still does both halves when called directly, so every existing
+   * caller/test is unaffected.
+   */
+  async prepareStart(taskId: string, options: StartAutoTaskOptions = {}): Promise<{ state: AutoTaskState; settled: boolean }> {
     const existing = await this.store.loadAutoTask(taskId);
     if (existing) {
-      if (TERMINAL_STATES.has(existing.state) || PAUSED_STATES.has(existing.state)) return existing;
-      return this.runLoop(existing, options.suppliedObjective); // coordinator-restart recovery: pick back up where the persisted state left off
+      if (TERMINAL_STATES.has(existing.state) || PAUSED_STATES.has(existing.state)) return { state: existing, settled: true };
+      return { state: existing, settled: false }; // coordinator-restart recovery: pick back up where the persisted state left off
     }
 
     const task = await this.store.loadTask(taskId);
@@ -141,14 +159,20 @@ export class AutomaticHandoffCoordinator {
       transitions: [],
     };
     await this.store.saveAutoTask(initial);
-    return this.runLoop(initial, options.suppliedObjective);
+    return { state: initial, settled: false };
   }
 
   /** Resuming a `paused_exhausted` task re-checks that provider's cooldown first — the pause is only lifted when the availability policy now permits it, not unconditionally. Resuming `paused_approval` always proceeds: calling this IS the human approval. */
-  async resume(taskId: string, options: { suppliedObjective?: string } = {}): Promise<AutoTaskState> {
+  async resume(taskId: string, options: { suppliedObjective?: string; signal?: AbortSignal } = {}): Promise<AutoTaskState> {
+    const { state, settled } = await this.prepareResume(taskId);
+    return settled ? state : this.continueFrom(state, options);
+  }
+
+  /** Phase 4's non-blocking resume path — same split as `prepareStart`/`continueFrom`, for the same reason. */
+  async prepareResume(taskId: string): Promise<{ state: AutoTaskState; settled: boolean }> {
     const state = await this.store.loadAutoTask(taskId);
     if (!state) throw new Error(`no automatic task state found for "${taskId}"`);
-    if (!PAUSED_STATES.has(state.state)) return state;
+    if (!PAUSED_STATES.has(state.state)) return { state, settled: true };
 
     if (state.state === "paused_exhausted") {
       const candidate = state.pendingDestination ?? (state.currentProvider ? otherProvider(state.currentProvider) : null);
@@ -163,7 +187,12 @@ export class AutomaticHandoffCoordinator {
     // assumed still valid just because the user asked to resume.
     const resumed = this.transition(state, "running", state.currentProvider, "resumed by user");
     await this.store.saveAutoTask(resumed);
-    return this.runLoop(resumed, options.suppliedObjective);
+    return { state: resumed, settled: false };
+  }
+
+  /** Runs the per-leg loop to completion/pause/failure from an already-persisted, non-settled state — the second half of `start()`/`resume()`, exposed so a daemon's scheduler can kick this off without awaiting it (requirement #4's "non-blocking"). */
+  continueFrom(state: AutoTaskState, options: { suppliedObjective?: string; signal?: AbortSignal } = {}): Promise<AutoTaskState> {
+    return this.runLoop(state, { suppliedObjective: options.suppliedObjective, signal: options.signal });
   }
 
   async pause(taskId: string): Promise<AutoTaskState> {
@@ -194,16 +223,16 @@ export class AutomaticHandoffCoordinator {
     return state?.transitions ?? [];
   }
 
-  private async runLoop(initial: AutoTaskState, suppliedObjective?: string): Promise<AutoTaskState> {
+  private async runLoop(initial: AutoTaskState, run: { suppliedObjective?: string; signal?: AbortSignal } = {}): Promise<AutoTaskState> {
     let state = initial;
     while (!TERMINAL_STATES.has(state.state) && !PAUSED_STATES.has(state.state)) {
-      state = await this.step(state, suppliedObjective);
+      state = await this.step(state, run);
       await this.store.saveAutoTask(state);
     }
     return state;
   }
 
-  private async step(state: AutoTaskState, suppliedObjective?: string): Promise<AutoTaskState> {
+  private async step(state: AutoTaskState, run: { suppliedObjective?: string; signal?: AbortSignal }): Promise<AutoTaskState> {
     switch (state.state) {
       case "queued":
         return this.transition(state, "running", state.currentProvider, "starting automatic supervision");
@@ -245,7 +274,7 @@ export class AutomaticHandoffCoordinator {
         return this.selectAndAdvance(state);
 
       case "handing_off":
-        return this.handOffAndAdvance(state, suppliedObjective);
+        return this.handOffAndAdvance(state, run.suppliedObjective, run.signal);
 
       case "validating":
         return this.validateAndAdvance(state);
@@ -293,7 +322,7 @@ export class AutomaticHandoffCoordinator {
     return this.transition(withSelection, "handing_off", selection.provider, selection.reason);
   }
 
-  private async handOffAndAdvance(state: AutoTaskState, suppliedObjective?: string): Promise<AutoTaskState> {
+  private async handOffAndAdvance(state: AutoTaskState, suppliedObjective: string | undefined, signal: AbortSignal | undefined): Promise<AutoTaskState> {
     const to = state.pendingDestination!;
     const currentHandoff = (await this.store.loadHandoff(state.currentHandoffId!))!;
     const failureSummary =
@@ -307,6 +336,7 @@ export class AutomaticHandoffCoordinator {
       suppliedObjective,
       forceLockOverride: false, // never automatically — requirement #2
       validationCommands: state.validationCommands,
+      signal,
     });
 
     if (to === "claude" && result.lastExecutionResult) {
@@ -341,6 +371,17 @@ export class AutomaticHandoffCoordinator {
     }
 
     const outcome = state.lastOutcome;
+    if (outcome?.kind === "cancelled") {
+      // Phase 4 requirement #5: distinguish a user-requested stop (new
+      // terminal "stopped" state) from a user-requested pause (reuses the
+      // existing "paused_approval" state — resuming it already works the
+      // same way regardless of why it paused) — never "failed", since
+      // this was asked for, not an error.
+      if (outcome.detail === "stop") {
+        return this.transition(state, "stopped", to, "stopped by explicit request while executing");
+      }
+      return this.transition(state, "paused_approval", to, `paused by explicit request while executing${outcome.detail ? ` (${outcome.detail})` : ""}`);
+    }
     if (outcome?.kind === "auth_failed" || outcome?.kind === "permission_required") {
       return this.transition(state, "paused_approval", to, `stopping automatic retries: ${outcome.kind}${outcome.detail ? ` (${outcome.detail})` : ""}`);
     }

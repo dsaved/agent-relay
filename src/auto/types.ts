@@ -13,7 +13,9 @@ export type AutoState =
   | "completed"
   | "paused_exhausted"
   | "paused_approval"
-  | "failed";
+  | "failed"
+  /** Phase 4: a user-requested stop that actually interrupted an in-flight execution — distinct from "failed", which stays reserved for an error/limit/refusal. A direct `stop()` call with nothing in flight still reports "failed", unchanged from Phase 3A, to avoid breaking existing callers. */
+  | "stopped";
 
 /**
  * Who can be trusted to be the only one writing to a workspace right

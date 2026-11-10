@@ -55,6 +55,11 @@ export function interpretCodexRun(result: SpawnRunResult): Interpreted {
     if (PERMISSION_RE.test(message)) return { sessionId, outcome: { kind: "permission_required", detail: message, cooldownResetsAt: null } };
   }
 
+  // Checked after the loop (so a session id already revealed before
+  // cancellation is still carried forward for a later resume) but ahead
+  // of "completed"/"crashed" — a daemon-requested pause/stop (Phase 4)
+  // must never be misreported as either.
+  if (result.cancelled) return { sessionId, outcome: { kind: "cancelled", detail: result.cancelReason, cooldownResetsAt: null } };
   if (sawTurnCompleted) return { sessionId, outcome: { kind: "completed", detail: null, cooldownResetsAt: null } };
   if (result.exitCode !== 0) {
     return {
@@ -117,6 +122,8 @@ export function interpretClaudeRun(result: SpawnRunResult): Interpreted {
   if (CONTEXT_RE.test(resultText)) return { sessionId, outcome: { kind: "context_exhausted", detail: resultText || "context exhaustion indicated", cooldownResetsAt: null } };
   if (PERMISSION_RE.test(resultText)) return { sessionId, outcome: { kind: "permission_required", detail: resultText || "permission required", cooldownResetsAt: null } };
 
+  // See the matching comment in interpretCodexRun on ordering/why.
+  if (result.cancelled) return { sessionId, outcome: { kind: "cancelled", detail: result.cancelReason, cooldownResetsAt: null } };
   if (sawResult && !isError) return { sessionId, outcome: { kind: "completed", detail: null, cooldownResetsAt: null } };
   if (sawResult && isError) return { sessionId, outcome: { kind: "unknown_error", detail: resultText || "claude reported an error result", cooldownResetsAt: null } };
   if (result.exitCode !== 0) {

@@ -1,5 +1,8 @@
 #!/usr/bin/env node
 import { createInterface } from "node:readline";
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { mkdir, writeFile, rm, readFile } from "node:fs/promises";
 import { CodexUsageMonitor } from "./codex/usageMonitor.js";
 import { formatCodexUsageStatus } from "./codex/formatUsage.js";
 import { ClaudeUsageMonitor } from "./claude/usageMonitor.js";
@@ -10,7 +13,7 @@ import { detectWorktreeInfo } from "./sessions/projectAssociation.js";
 import { prepareHandoffSnapshot } from "./sessions/handoff.js";
 import { formatSessionLine, formatHandoffSnapshot } from "./sessions/format.js";
 import type { SessionProvider } from "./sessions/types.js";
-import { HandoffStore } from "./handoff/store.js";
+import { HandoffStore, defaultStoreRoot } from "./handoff/store.js";
 import { createHandoffRecord } from "./handoff/prepare.js";
 import { HandoffEngine } from "./handoff/engine.js";
 import { formatHandoffRecord, formatTask } from "./handoff/format.js";
@@ -19,6 +22,12 @@ import { formatAutoTaskState, formatAutoHistory } from "./auto/format.js";
 import { DesktopRegistry, parseHookEvent } from "./desktop/registry.js";
 import { requestDesktopHandoff } from "./desktop/handoff.js";
 import { formatDesktopSession } from "./desktop/format.js";
+import { callDaemon, pingDaemon, DaemonUnreachableError } from "./daemon/client.js";
+import { defaultSocketPath, runForeground } from "./daemon/process.js";
+import { generateLaunchdPlist, plistPath, launchAgentsDir, DEFAULT_LAUNCHD_LABEL } from "./daemon/launchd.js";
+import { logPath } from "./daemon/log.js";
+import type { AutoTaskState } from "./auto/types.js";
+import type { SubmitResult } from "./daemon/scheduler.js";
 
 async function codexStatus(): Promise<{ text: string; exitCode: number }> {
   const monitor = new CodexUsageMonitor();
@@ -205,34 +214,66 @@ function exitCodeForAutoState(stateName: string): number {
 }
 
 /**
- * Runs in the foreground for Phase 3A (requirement #7) — it drives the
- * coordinator's loop to completion/pause/failure and exits; persistent
- * background operation is a later daemon phase, not this one.
+ * Phase 4 requirement #4: if a daemon is reachable, every `auto` command
+ * that can mutate state goes through it instead of running
+ * `AutomaticHandoffCoordinator` directly in this short-lived CLI process.
+ * `DaemonUnreachableError` (no socket / stale socket — see
+ * src/daemon/client.ts) is the ONLY case that falls back to Phase 3A's
+ * original, unchanged, direct/blocking behavior below — a command the
+ * daemon genuinely rejected (`DaemonCommandError`) or didn't answer in
+ * time (`DaemonTimeoutError`) is a real failure, not "no daemon running".
+ */
+async function callDaemonIfRunning(command: string, args: unknown): Promise<{ reachable: true; result: unknown } | { reachable: false }> {
+  try {
+    const result = await callDaemon(defaultSocketPath(defaultStoreRoot()), command, args, { timeoutMs: 5_000 });
+    return { reachable: true, result };
+  } catch (err) {
+    if (err instanceof DaemonUnreachableError) return { reachable: false };
+    throw err;
+  }
+}
+
+function formatSubmitResult(submit: SubmitResult): string {
+  const lines = [formatAutoTaskState(submit.state)];
+  lines.push("", submit.running ? "Accepted by the daemon and durably recorded — running in the background; use `auto status`/`auto history` to check progress." : "Already settled — nothing new was started.");
+  return lines.join("\n");
+}
+
+/**
+ * Without a daemon, this runs in the foreground exactly as Phase 3A
+ * always has — it drives the coordinator's loop to completion/pause/
+ * failure and exits. With a daemon running, it instead submits the task
+ * and returns as soon as the daemon has durably recorded it — never
+ * presenting that acceptance as completion (requirement #4).
  */
 async function autoStartCommand(args: string[]): Promise<{ text: string; exitCode: number }> {
   const taskId = args[0];
   if (!taskId) return { text: "Usage: agent-relay auto start <task-id> [--objective \"...\"] [--validate \"cmd\"]... [--allow-unknown-availability] [--max-handoffs N] [--max-attempts N] [--max-runtime-ms N] [--pin <claude|codex>]", exitCode: 1 };
 
-  const coordinator = new AutomaticHandoffCoordinator();
-  try {
-    const pin = parseFlag(args, "--pin");
-    if (pin && pin !== "claude" && pin !== "codex") return { text: `Unknown --pin "${pin}" (expected "claude" or "codex")`, exitCode: 1 };
+  const pin = parseFlag(args, "--pin");
+  if (pin && pin !== "claude" && pin !== "codex") return { text: `Unknown --pin "${pin}" (expected "claude" or "codex")`, exitCode: 1 };
+  const options = {
+    suppliedObjective: parseFlag(args, "--objective"),
+    validationCommands: parseAllFlags(args, "--validate"),
+    allowUnknownAvailability: hasFlag(args, "--allow-unknown-availability"),
+    maxHandoffs: parseFlag(args, "--max-handoffs") ? Number(parseFlag(args, "--max-handoffs")) : undefined,
+    maxAttempts: parseFlag(args, "--max-attempts") ? Number(parseFlag(args, "--max-attempts")) : undefined,
+    maxRuntimeMs: parseFlag(args, "--max-runtime-ms") ? Number(parseFlag(args, "--max-runtime-ms")) : undefined,
+    pinnedProvider: pin as "claude" | "codex" | undefined,
+  };
 
-    const state = await coordinator.start(taskId, {
-      suppliedObjective: parseFlag(args, "--objective"),
-      validationCommands: parseAllFlags(args, "--validate"),
-      allowUnknownAvailability: hasFlag(args, "--allow-unknown-availability"),
-      maxHandoffs: parseFlag(args, "--max-handoffs") ? Number(parseFlag(args, "--max-handoffs")) : undefined,
-      maxAttempts: parseFlag(args, "--max-attempts") ? Number(parseFlag(args, "--max-attempts")) : undefined,
-      maxRuntimeMs: parseFlag(args, "--max-runtime-ms") ? Number(parseFlag(args, "--max-runtime-ms")) : undefined,
-      pinnedProvider: pin as "claude" | "codex" | undefined,
-    });
+  try {
+    const viaDaemon = await callDaemonIfRunning("autoStart", { taskId, options });
+    if (viaDaemon.reachable) return { text: formatSubmitResult(viaDaemon.result as SubmitResult), exitCode: 0 };
+
+    const state = await new AutomaticHandoffCoordinator().start(taskId, options);
     return { text: formatAutoTaskState(state), exitCode: exitCodeForAutoState(state.state) };
   } catch (err) {
     return { text: `agent-relay: ${err instanceof Error ? err.message : String(err)}`, exitCode: 1 };
   }
 }
 
+/** Pure read — reads the store directly whether or not a daemon is running, since there's nothing to round-trip for a read-only status check. */
 async function autoStatusCommand(taskId: string | undefined): Promise<{ text: string; exitCode: number }> {
   if (!taskId) return { text: "Usage: agent-relay auto status <task-id>", exitCode: 1 };
   const state = await new AutomaticHandoffCoordinator().status(taskId);
@@ -240,10 +281,18 @@ async function autoStatusCommand(taskId: string | undefined): Promise<{ text: st
   return { text: formatAutoTaskState(state), exitCode: 0 };
 }
 
+/**
+ * With a daemon running and this task genuinely executing there, this
+ * reaches the real in-flight `AbortController` (requirement #5 — pause
+ * actually interrupts an in-flight run, not just a state file). Without
+ * one, falls back to Phase 3A's original direct store mutation,
+ * unchanged.
+ */
 async function autoPauseCommand(taskId: string | undefined): Promise<{ text: string; exitCode: number }> {
   if (!taskId) return { text: "Usage: agent-relay auto pause <task-id>", exitCode: 1 };
   try {
-    const state = await new AutomaticHandoffCoordinator().pause(taskId);
+    const viaDaemon = await callDaemonIfRunning("autoPause", { taskId });
+    const state = viaDaemon.reachable ? (viaDaemon.result as AutoTaskState) : await new AutomaticHandoffCoordinator().pause(taskId);
     return { text: formatAutoTaskState(state), exitCode: 0 };
   } catch (err) {
     return { text: `agent-relay: ${err instanceof Error ? err.message : String(err)}`, exitCode: 1 };
@@ -253,18 +302,24 @@ async function autoPauseCommand(taskId: string | undefined): Promise<{ text: str
 async function autoResumeCommand(args: string[]): Promise<{ text: string; exitCode: number }> {
   const taskId = args[0];
   if (!taskId) return { text: "Usage: agent-relay auto resume <task-id> [--objective \"...\"]", exitCode: 1 };
+  const suppliedObjective = parseFlag(args, "--objective");
   try {
-    const state = await new AutomaticHandoffCoordinator().resume(taskId, { suppliedObjective: parseFlag(args, "--objective") });
+    const viaDaemon = await callDaemonIfRunning("autoResume", { taskId, suppliedObjective });
+    if (viaDaemon.reachable) return { text: formatSubmitResult(viaDaemon.result as SubmitResult), exitCode: 0 };
+
+    const state = await new AutomaticHandoffCoordinator().resume(taskId, { suppliedObjective });
     return { text: formatAutoTaskState(state), exitCode: exitCodeForAutoState(state.state) };
   } catch (err) {
     return { text: `agent-relay: ${err instanceof Error ? err.message : String(err)}`, exitCode: 1 };
   }
 }
 
+/** Same daemon-first/direct-fallback split as `autoPauseCommand` — see its doc comment. */
 async function autoStopCommand(taskId: string | undefined): Promise<{ text: string; exitCode: number }> {
   if (!taskId) return { text: "Usage: agent-relay auto stop <task-id>", exitCode: 1 };
   try {
-    const state = await new AutomaticHandoffCoordinator().stop(taskId);
+    const viaDaemon = await callDaemonIfRunning("autoStop", { taskId });
+    const state = viaDaemon.reachable ? (viaDaemon.result as AutoTaskState) : await new AutomaticHandoffCoordinator().stop(taskId);
     return { text: formatAutoTaskState(state), exitCode: 0 };
   } catch (err) {
     return { text: `agent-relay: ${err instanceof Error ? err.message : String(err)}`, exitCode: 1 };
@@ -351,6 +406,127 @@ async function desktopHookEventCommand(): Promise<{ text: string; exitCode: numb
   return { text: lines.length > 0 ? lines.join("\n") : "No hook events received on stdin.", exitCode: sawError ? 1 : 0 };
 }
 
+/** The absolute path to this very file, as built — what both `daemon start` (spawning a background process) and `daemon install`'s generated plist (as its `ProgramArguments`) point `node` at. */
+function resolveCliPath(): string {
+  return fileURLToPath(import.meta.url);
+}
+
+async function daemonPingStatus(): Promise<{ pid: number; uptimeMs: number; version: string } | null> {
+  return pingDaemon(defaultSocketPath(defaultStoreRoot()));
+}
+
+/**
+ * Requirement #2: writes the plist file only — it never calls
+ * `launchctl load`/`bootstrap` itself. Loading/activating a launchd
+ * service is a standing, persistent-configuration change on your system,
+ * which this session's own rules (and the task's own "do not
+ * automatically install or activate the service during development")
+ * require asking you about separately; this command prints the exact
+ * command to run instead of running it.
+ */
+async function daemonInstallCommand(): Promise<{ text: string; exitCode: number }> {
+  const stateDir = defaultStoreRoot();
+  const plist = generateLaunchdPlist({ nodePath: process.execPath, cliPath: resolveCliPath(), stateDir });
+  const path = plistPath();
+  await mkdir(launchAgentsDir(), { recursive: true });
+  await writeFile(path, plist);
+  return {
+    text: [
+      `Wrote ${path}.`,
+      "",
+      "This does NOT load or activate the service — run this yourself when you're ready:",
+      `  launchctl bootstrap gui/$(id -u) ${path}`,
+      "",
+      "To have it also start immediately: add `launchctl kickstart -k gui/$(id -u)/" + DEFAULT_LAUNCHD_LABEL + "` after that.",
+    ].join("\n"),
+    exitCode: 0,
+  };
+}
+
+async function daemonUninstallCommand(): Promise<{ text: string; exitCode: number }> {
+  const path = plistPath();
+  await rm(path, { force: true });
+  return {
+    text: [`Removed ${path} (if it existed).`, "", "If the service was loaded, unload it yourself first or after, with:", `  launchctl bootout gui/$(id -u)/${DEFAULT_LAUNCHD_LABEL}`].join("\n"),
+    exitCode: 0,
+  };
+}
+
+/** Spawns the daemon as a detached background process — independent of this terminal session, per requirement #1. Refuses if one is already running for this state directory (the daemon's own single-instance guard would refuse too; checking here just gives a clearer message). */
+async function daemonStartCommand(): Promise<{ text: string; exitCode: number }> {
+  const existing = await daemonPingStatus();
+  if (existing) return { text: `Already running (pid ${existing.pid}, up ${Math.round(existing.uptimeMs / 1000)}s).`, exitCode: 0 };
+
+  const child = spawn(process.execPath, [resolveCliPath(), "daemon", "run-foreground"], { detached: true, stdio: "ignore" });
+  child.unref();
+
+  for (let attempt = 0; attempt < 20; attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    const started = await daemonPingStatus();
+    if (started) return { text: `Daemon started (pid ${started.pid}).`, exitCode: 0 };
+  }
+  return { text: "agent-relay: daemon did not respond after starting — check `agent-relay daemon logs`.", exitCode: 1 };
+}
+
+async function daemonStopCommand(): Promise<{ text: string; exitCode: number }> {
+  const existing = await daemonPingStatus();
+  if (!existing) return { text: "Not running.", exitCode: 0 };
+  try {
+    await callDaemon(defaultSocketPath(defaultStoreRoot()), "shutdown", {});
+  } catch {
+    // The connection itself may drop as part of shutdown — that's expected, not a failure to report.
+  }
+  return { text: `Stop requested (was pid ${existing.pid}).`, exitCode: 0 };
+}
+
+async function daemonRestartCommand(): Promise<{ text: string; exitCode: number }> {
+  const stopResult = await daemonStopCommand();
+  if (stopResult.exitCode !== 0) return stopResult;
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  return daemonStartCommand();
+}
+
+async function daemonStatusCommand(): Promise<{ text: string; exitCode: number }> {
+  const stateDir = defaultStoreRoot();
+  const existing = await daemonPingStatus();
+  const lines = [
+    existing ? `Running (pid ${existing.pid}, up ${Math.round(existing.uptimeMs / 1000)}s).` : "Not running.",
+    `state directory: ${stateDir}`,
+    `socket: ${defaultSocketPath(stateDir)}`,
+  ];
+  try {
+    await readFile(plistPath(), "utf8");
+    lines.push(`launchd plist installed at: ${plistPath()} (installed ≠ loaded — this does not check \`launchctl list\`)`);
+  } catch {
+    lines.push("launchd plist: not installed (`agent-relay daemon install` to generate one)");
+  }
+  return { text: lines.join("\n"), exitCode: existing ? 0 : 1 };
+}
+
+async function daemonLogsCommand(args: string[]): Promise<{ text: string; exitCode: number }> {
+  const stateDir = defaultStoreRoot();
+  const dateFlag = parseFlag(args, "--date");
+  const path = logPath(stateDir, dateFlag ? new Date(dateFlag) : new Date());
+  let raw: string;
+  try {
+    raw = await readFile(path, "utf8");
+  } catch {
+    return { text: `No log file at ${path} yet.`, exitCode: 0 };
+  }
+  const linesFlag = parseFlag(args, "--lines");
+  const allLines = raw.split("\n").filter((l) => l.trim());
+  const tail = linesFlag ? allLines.slice(-Number(linesFlag)) : allLines;
+  return { text: tail.join("\n"), exitCode: 0 };
+}
+
+/** `agent-relay daemon run-foreground` — what `daemon start` spawns and what the generated launchd plist's `ProgramArguments` literally invoke. Blocks until SIGTERM/SIGINT. */
+async function daemonRunForegroundCommand(): Promise<never> {
+  await runForeground();
+  return new Promise<never>(() => {
+    /* intentionally never resolves — this process exits via the SIGTERM/SIGINT handler installed inside runForeground(), not by returning here */
+  });
+}
+
 function printHelp(): void {
   console.log(
     [
@@ -387,6 +563,15 @@ function printHelp(): void {
       "  desktop handoff <session-id> --to <claude|codex> [--force-lock] [--validate \"cmd\"]...",
       "                                       Assess ownership, then reuse `handoff execute`'s engine to continue the work.",
       "  desktop hook-event                  Read Claude Code hook JSON (one per line) from stdin and record it as evidence.",
+      "",
+      "  daemon install                      Generate the launchd plist (does not load/activate it — prints the command to run yourself).",
+      "  daemon uninstall                    Remove the generated plist (does not unload it — prints the command to run yourself).",
+      "  daemon start                        Spawn the daemon as a detached background process.",
+      "  daemon stop                         Ask a running daemon to shut down gracefully.",
+      "  daemon restart                      Stop, then start.",
+      "  daemon status                       Report whether a daemon is running and whether a plist is installed.",
+      "  daemon logs [--date YYYY-MM-DD] [--lines N]",
+      "                                       Show structured daemon log lines.",
     ].join("\n"),
   );
 }
@@ -500,6 +685,44 @@ async function main(): Promise<number> {
     const { text, exitCode } = await desktopHookEventCommand();
     console.log(text);
     return exitCode;
+  }
+  if (command === "daemon" && subcommand === "install") {
+    const { text, exitCode } = await daemonInstallCommand();
+    console.log(text);
+    return exitCode;
+  }
+  if (command === "daemon" && subcommand === "uninstall") {
+    const { text, exitCode } = await daemonUninstallCommand();
+    console.log(text);
+    return exitCode;
+  }
+  if (command === "daemon" && subcommand === "start") {
+    const { text, exitCode } = await daemonStartCommand();
+    console.log(text);
+    return exitCode;
+  }
+  if (command === "daemon" && subcommand === "stop") {
+    const { text, exitCode } = await daemonStopCommand();
+    console.log(text);
+    return exitCode;
+  }
+  if (command === "daemon" && subcommand === "restart") {
+    const { text, exitCode } = await daemonRestartCommand();
+    console.log(text);
+    return exitCode;
+  }
+  if (command === "daemon" && subcommand === "status") {
+    const { text, exitCode } = await daemonStatusCommand();
+    console.log(text);
+    return exitCode;
+  }
+  if (command === "daemon" && subcommand === "logs") {
+    const { text, exitCode } = await daemonLogsCommand(rest);
+    console.log(text);
+    return exitCode;
+  }
+  if (command === "daemon" && subcommand === "run-foreground") {
+    return daemonRunForegroundCommand();
   }
   printHelp();
   return command === undefined ? 0 : 1;

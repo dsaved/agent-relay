@@ -175,4 +175,9 @@ export class WorkspaceLockManager {
     if (!existing) return false;
     return !isPidAlive(existing.holderPid);
   }
+
+  /** Non-mutating passthrough, for callers (Phase 4's crash recovery) that need to distinguish "no lock at all" from "a lock whose holder is dead" from "a lock held by a genuinely live process", rather than the single collapsed boolean the two methods above report. */
+  async readLockRecord(workspacePath: string): Promise<WorkspaceLockRecord | null> {
+    return this.store.readLock(await lockKeyFor(workspacePath));
+  }
 }

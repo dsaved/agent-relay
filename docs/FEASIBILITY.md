@@ -28,6 +28,8 @@ This document covers two phases:
   own document, [`docs/AUTOMATIC_HANDOFF.md`](AUTOMATIC_HANDOFF.md).
 - **Phase 3B** (desktop session integration and safe ownership transfer)
   has its own document, [`docs/DESKTOP_INTEGRATION.md`](DESKTOP_INTEGRATION.md).
+- **Phase 4** (persistent macOS background daemon) has its own document,
+  [`docs/DAEMON.md`](DAEMON.md).
 
 ## Phase 0 Feasibility
 
@@ -622,4 +624,66 @@ npm run typecheck   # tsc --noEmit — PASS
 npm run lint        # eslint src test — PASS
 npm run build       # tsc — PASS
 npm run test        # tsc build + node --test — PASS (131/131)
+```
+
+---
+
+## Phase 4 — Persistent macOS Background Daemon
+
+Full writeup and the 28-item capability matrix live in
+[`docs/DAEMON.md`](DAEMON.md). Summary:
+
+- A new `src/daemon/` module turns the existing, unchanged
+  `AutomaticHandoffCoordinator`/`HandoffEngine` into a persistent
+  background service: a Unix-socket control protocol (`src/daemon/
+  protocol.ts`/`socketServer.ts`/`client.ts`, user-only `0600`
+  permissions, no TCP listener), a non-blocking task scheduler
+  (`src/daemon/scheduler.ts`), crash recovery (`src/daemon/recovery.ts`),
+  desktop-session polling reusing Phase 3B's `DesktopRegistry` unchanged
+  (`src/daemon/desktopMonitor.ts`), a config file with no credential field
+  anywhere in its type (`src/daemon/config.ts`), structured/redacted JSONL
+  logs (`src/daemon/log.ts`), and launchd plist generation (`src/daemon/
+  launchd.ts`). **Per the task's own restriction, no new handoff engine was
+  built** — the daemon only hosts the existing one persistently.
+- **The coordinator's only change is a behavior-preserving decomposition**:
+  `start()`/`resume()` are now `prepareStart()`/`prepareResume()` (the
+  durable "accept and record" half) + `continueFrom()` (the existing
+  per-leg loop) — `start()`/`resume()` themselves still do both, so every
+  one of the 137 pre-Phase-4 tests passes unmodified, confirming this adds
+  no behavior change for any existing caller.
+- **Real mid-execution cancellation**: a new, optional `AbortSignal`
+  threads from the daemon's scheduler through
+  `AutomaticHandoffCoordinator` → `HandoffEngine` → the execution
+  adapter → `spawnRun`, which reuses its **existing** process-group
+  kill/timeout machinery (Phase 2C) on abort — a new `"cancelled"`
+  `ExecutionOutcomeKind`, checked ahead of crash/timeout classification,
+  means a daemon-requested pause/stop is never misreported as either. A
+  new terminal `AutoState`, `"stopped"`, is reached only when a live
+  execution was genuinely interrupted with reason `"stop"`; pausing
+  mid-execution reuses the existing `"paused_approval"` state. A direct
+  `coordinator.stop()`/`pause()` call with nothing in flight is completely
+  unchanged from Phase 3A — the new, more precise outcomes only apply to
+  the genuinely-interrupted case.
+- **Crash recovery never assumes an old PID still belongs to the original
+  worker** — it reads the real lock record and checks real process
+  liveness (the same `isPidAlive` Phase 2C already built), refusing to
+  resume anything whose lock is held by a genuinely live process, and
+  logging every decision (resumed/left-alone/skipped-corrupted) as an
+  audit trail. A corrupted task-state file is skipped, never fatal to
+  startup.
+- **Per the task's own restrictions**: `daemon install`/`uninstall` only
+  write/remove the plist file — neither this phase nor any command in it
+  calls `launchctl load`/`bootstrap`/`bootout` itself, and nothing wires a
+  Claude Code hook into the user's real `~/.claude/settings.json`. No live
+  coding-agent turn was run; no commit was made.
+- 32 new tests, all against fakes and disposable state/socket directories
+  (`mkdtemp`) — no real launchd write, no real model call.
+
+### Verification run (Phase 0 + 1A + 1B + 2A + 2B + 2C + 3A + 3B + 4)
+
+```
+npm run typecheck   # tsc --noEmit — PASS
+npm run lint        # eslint src test — PASS
+npm run build       # tsc — PASS
+npm run test        # tsc build + node --test — PASS (169/169)
 ```

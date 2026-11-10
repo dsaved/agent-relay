@@ -22,6 +22,7 @@ export class CodexExecutionAdapter implements AgentExecutionAdapter {
       cwd: options.cwd,
       timeoutMs: options.timeoutMs,
       maxOutputBytes: options.maxOutputBytes,
+      signal: options.signal,
     });
     const { sessionId, outcome } = interpretCodexRun(result);
 
