@@ -18,6 +18,8 @@ export interface OpenHandoffLiveResult {
   handoff: HandoffRecord;
   openResult?: LiveOpenResult;
   desktopRecord?: DesktopSessionRecord;
+  /** The instruction that was built for this attempt — present whenever `openResult` is, so a caller can show it for the person to paste in by hand when `openResult.seeded` is false. */
+  instruction?: string;
   /** Set whenever nothing was opened: no adapter for this provider, a busy workspace without override, or a missing objective/workspace path. */
   blockedReason?: string;
 }
@@ -84,5 +86,5 @@ export async function openHandoffLive(handoffId: string, options: OpenHandoffLiv
   const originatingApp = options.to === "claude" ? "Claude Desktop app" : `${options.to} app (opened live)`;
   const desktopRecord = await registry.registerFromHandoff(handoff, resumeSessionId ?? handoff.handoffId, originatingApp, activitySignal.status, openResult.detail);
 
-  return { handoff, openResult, desktopRecord };
+  return { handoff, openResult, desktopRecord, instruction };
 }

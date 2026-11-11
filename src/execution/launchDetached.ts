@@ -9,26 +9,37 @@ export interface LaunchDetachedOptions {
 export interface LaunchDetachedResult {
   launched: boolean;
   pid: number | null;
+  /** A real spawn failure (e.g. the binary not existing on PATH) — null when the process started. */
   error: string | null;
 }
 
-const SPAWN_ERROR_GRACE_MS = 50;
+const SPAWN_ERROR_GRACE_MS = 500;
 
 /**
  * Fire-and-forget launch for a GUI-opening command (e.g. `claude
  * --desktop`, `codex app`) — deliberately not `spawnRun.ts`: there is
- * nothing to wait for (a window just opens), so no timeout, no output
- * capture, no process-group kill. `detached: true` + `unref()` lets this
- * process exit without taking the launched app down with it. Waits one
- * short grace period for Node's own async spawn-error event (e.g. the
- * binary not existing on PATH) before reporting success — without it,
- * a missing CLI would be reported "launched" even though nothing opened.
+ * nothing to wait for (a window just opens), so no timeout-driven kill,
+ * no process-group signaling.
+ *
+ * **`stdio: "inherit"`, not piped, not ignored — live-confirmed twice**:
+ * piping stdout/stderr to capture them (an earlier version of this file)
+ * surfaced the real reason nothing opened: `claude --desktop` refuses to
+ * run at all when its own stdio looks redirected ("--desktop opens the
+ * Claude Desktop app and can't run non-interactively (`--print`,
+ * `--sdk-url`, `--init-only`, or redirected output)"). Inheriting this
+ * process's own stdio keeps the child's streams genuinely attached to
+ * the real terminal `agent-relay` itself was run from, which is what
+ * satisfies that check — any output or error the command prints goes
+ * straight to the person's terminal in real time, which is strictly
+ * better here than being relayed through a captured string. `unref()`
+ * alone is enough to let this process exit without waiting on the
+ * child; inherited file descriptors stay open for the child regardless.
  */
 export function launchDetached(options: LaunchDetachedOptions, spawnImpl: typeof spawn = spawn): Promise<LaunchDetachedResult> {
   return new Promise((resolve) => {
     let child: ChildProcess;
     try {
-      child = spawnImpl(options.command, options.args, { cwd: options.cwd, stdio: "ignore", detached: true });
+      child = spawnImpl(options.command, options.args, { cwd: options.cwd, stdio: "inherit" });
     } catch (err) {
       resolve({ launched: false, pid: null, error: err instanceof Error ? err.message : String(err) });
       return;

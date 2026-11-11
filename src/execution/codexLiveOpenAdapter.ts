@@ -31,6 +31,7 @@ export class CodexLiveOpenAdapter implements LiveOpenAdapter {
         launched: appResult.launched,
         command: appCommand,
         sessionId: null,
+        seeded: false,
         detail: appResult.launched
           ? "launched `codex app` with no existing thread to resume — the instruction was NOT seeded; paste it manually once a session is started"
           : `failed to launch codex app: ${appResult.error ?? "unknown error"}`,
@@ -45,6 +46,7 @@ export class CodexLiveOpenAdapter implements LiveOpenAdapter {
         launched: false,
         command: queueCommand,
         sessionId: options.resumeSessionId,
+        seeded: false,
         detail: `codex queue exited with code ${queueResult.exitCode ?? "null"}: ${queueResult.stderr.trim() || "no stderr output"}`,
       };
     }
@@ -54,7 +56,10 @@ export class CodexLiveOpenAdapter implements LiveOpenAdapter {
       launched: appResult.launched,
       command: [...queueCommand, "&&", ...appCommand],
       sessionId: options.resumeSessionId,
-      detail: appResult.launched ? "queued the instruction into the existing thread and launched `codex app`" : `queued the instruction, but failed to launch codex app: ${appResult.error ?? "unknown error"}`,
+      seeded: true,
+      detail: appResult.launched
+        ? "queued the instruction into the existing thread and launched `codex app`"
+        : `queued the instruction, but failed to launch codex app: ${appResult.error ?? "unknown error"}`,
     };
   }
 }

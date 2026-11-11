@@ -18,14 +18,46 @@ knows when a live session you're looking at is "done."
 ## What's real, per provider
 
 Found by reading this machine's real `claude --help`/`codex --help`/
-`copilot --help` (read-only — nothing was executed to produce this table).
-None of it has been run live yet; see "Unverified" below.
+`copilot --help` (read-only). The Claude row below was then **live-tested**
+on a real install — see "Live-verified findings."
 
 | Provider | Primitive | What `handoff open` does |
 |---|---|---|
-| **Claude** | `--desktop` flag: "Open in the Claude Desktop app instead of the terminal (with `--continue` or `--resume <id>` to pick the session)" | `claude --desktop [--resume <id>] "<instruction>"`, fired detached. Opens the actual Claude Desktop app window, on the resumed session (or a brand-new one), with the instruction as the next/first message. |
+| **Claude** | `--desktop` flag: "Open in the Claude Desktop app instead of the terminal (with `--continue` or `--resume <id>` to pick the session)" | `claude --desktop [--resume <id>]`, fired detached, **never with a prompt** (see below — the CLI refuses one). Opens the Claude Desktop app on the resumed session (or a brand-new one); the instruction is never seeded and is printed for the person to paste in themselves. |
 | **Codex** | `codex queue --thread <id> --message <text>` ("Queue a message for an existing session") + `codex app [PATH]` ("Launch the Desktop app") | With a known thread: `codex queue --thread <id> --message "<instruction>"` (headless, quick, capturable exit code), then `codex app <cwd>` fired detached to bring the app forward. With no known thread yet: only `codex app <cwd>` fires — there's no documented way to seed a brand-new thread's first message from outside, so the instruction is **not** seeded; the result says so plainly. |
 | **Copilot** | None found | `copilot app` only opens the app for a directory, with no session targeting; `copilot sessions` has only an `import` subcommand; `--resume` is terminal-only, no desktop equivalent. `handoff open --to copilot` is refused by `openHandoffLive` itself (no adapter registered), with a message pointing at `handoff execute` — same mechanism that would refuse any future provider with no `LiveOpenAdapter`. |
+
+## Live-verified findings
+
+- **`claude --desktop` flatly refuses a prompt argument.** Confirmed on a
+  real install: `claude --desktop "ping test"` exits immediately with
+  `--desktop doesn't take a prompt yet. Run \`claude --desktop\`, then type
+  it in the app.` So the `--help` text's "with `--continue` or `--resume
+  <id>` to pick the session" is only about *which session*, never about
+  seeding its first message. `ClaudeLiveOpenAdapter` never passes the
+  instruction as an argument; `LiveOpenResult.seeded` is always `false` for
+  Claude, and `handoff open`'s CLI output prints the instruction text so it
+  can be pasted into the app by hand.
+- Also confirmed: the Claude Desktop app itself was already installed and
+  running when this was tested, so "the app isn't open" is not what blocks
+  seeding — the CLI's own `--desktop` flag rejects the prompt outright,
+  independent of whether the app is running.
+- **`claude --desktop` refuses to run at all with redirected stdio.**
+  Live-tested in two rounds: first with the original `launchDetached`
+  (`detached: true, stdio: "ignore"`) — nothing visible happened, process
+  reported `launched: true`. Switching to piped stdio (to capture stderr
+  for diagnosis) surfaced the real cause: `--desktop opens the Claude
+  Desktop app and can't run non-interactively (--print, --sdk-url,
+  --init-only, or redirected output)`. `--desktop` checks whether its own
+  stdio looks like a real terminal and refuses outright if not — both
+  "ignore" and "pipe" count as redirected. `launchDetached` now uses
+  `stdio: "inherit"`, which keeps the child's streams genuinely attached
+  to the terminal `agent-relay` itself was run from. `unref()` alone is
+  enough to let `agent-relay` exit without waiting on the child;
+  inherited file descriptors stay valid for it regardless. One
+  consequence: `agent-relay` can no longer capture this command's own
+  output — anything it prints goes straight to the person's terminal in
+  real time instead, which is what let this exact bug surface.
 
 ## Safety model
 
@@ -78,13 +110,23 @@ Reuses Phase 2C/3B's existing primitives rather than inventing new ones:
 - `src/desktop/registry.ts` — `DesktopRegistry.registerFromHandoff()`,
   the one new method; everything else in that file is unchanged.
 
+## Live-verified: the Claude open path works end to end
+
+`agent-relay handoff open <id> --to claude` genuinely opens a new Claude
+Desktop window, confirmed on a real repo (`sunbeam`) after the
+`stdio: "inherit"` fix above. Claude opened its own fresh worktree on an
+auto-generated branch (its own default isolation behavior, not something
+`agent-relay` controls or needs to) and, with no instruction seeded,
+correctly reported nothing in progress and asked what to work on — exactly
+the expected behavior given `--desktop` can't take a prompt. Pasting the
+printed instruction block into that conversation is the one manual step
+left, and `handoff open`'s own CLI output exists specifically to make that
+copy-paste trivial.
+
 ## Unverified — pending a separate, explicit live check
 
-Same gate every live call in this project's history has gone through; not
-run during this phase's planning or implementation:
-
-- Does `claude --desktop` really accept a prompt together with
-  `--resume`, and does it foreground an existing window or open a new one?
+- Does `--desktop --resume <id>` correctly reopen that exact session
+  (rather than a fresh worktree) on a second `handoff open` call?
 - Does `codex app <path>` auto-attach to an existing thread for that path,
   or always open blank?
 - Does `codex queue` require the shared app-server daemon to already be

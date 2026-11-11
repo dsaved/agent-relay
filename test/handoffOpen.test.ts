@@ -37,7 +37,7 @@ async function prepare(repoRoot: string, store: HandoffStore): Promise<string> {
 test("handoff open: a confirmed-busy workspace is refused without --force-open, and the adapter is never called", async () => {
   await withEnv(async ({ repoRoot, store }) => {
     const handoffId = await prepare(repoRoot, store);
-    const claude = new FakeLiveOpenAdapter({ launched: true, command: [], sessionId: null, detail: "" });
+    const claude = new FakeLiveOpenAdapter({ launched: true, command: [], sessionId: null, seeded: false, detail: "" });
     const result = await openHandoffLive(handoffId, { to: "claude" }, { store, adapters: { claude }, checkProviderActivity: async () => CONFIRMED_BUSY });
     assert.ok(result.blockedReason);
     assert.equal(claude.calls.length, 0);
@@ -47,7 +47,7 @@ test("handoff open: a confirmed-busy workspace is refused without --force-open, 
 test("handoff open: --force-open overrides a busy signal and launches", async () => {
   await withEnv(async ({ repoRoot, store }) => {
     const handoffId = await prepare(repoRoot, store);
-    const claude = new FakeLiveOpenAdapter({ launched: true, command: ["claude", "--desktop"], sessionId: null, detail: "launched" });
+    const claude = new FakeLiveOpenAdapter({ launched: true, command: ["claude", "--desktop"], sessionId: null, seeded: false, detail: "launched" });
     const result = await openHandoffLive(handoffId, { to: "claude", forceOpenOverride: true }, { store, adapters: { claude }, checkProviderActivity: async () => CONFIRMED_BUSY });
     assert.equal(result.blockedReason, undefined);
     assert.equal(claude.calls.length, 1);
@@ -57,7 +57,7 @@ test("handoff open: --force-open overrides a busy signal and launches", async ()
 test("handoff open: a successful open registers a desktop session (external_active) and sets handoff.status to opened_live", async () => {
   await withEnv(async ({ repoRoot, store }) => {
     const handoffId = await prepare(repoRoot, store);
-    const claude = new FakeLiveOpenAdapter({ launched: true, command: ["claude", "--desktop", "x"], sessionId: null, detail: "launched claude --desktop" });
+    const claude = new FakeLiveOpenAdapter({ launched: true, command: ["claude", "--desktop", "x"], sessionId: null, seeded: false, detail: "launched claude --desktop" });
     const result = await openHandoffLive(handoffId, { to: "claude" }, { store, adapters: { claude }, checkProviderActivity: async () => CONFIRMED_IDLE });
 
     assert.equal(result.blockedReason, undefined);

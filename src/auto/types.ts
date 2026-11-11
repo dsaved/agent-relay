@@ -78,10 +78,14 @@ export interface AutoTaskState {
   validationCommands: string[];
   /** Explicit config override: when set, only this provider may ever be selected (used by tests and by a human pinning a direction) — selection logic otherwise picks the next eligible provider from `enabledProviders` automatically. */
   pinnedProvider: SessionProvider | null;
+  /** True only when `pinnedProvider` came from `auto start --pin` — a standing choice for the task's whole lifetime, never cleared. A one-time choice supplied via `resume(taskId, { pin })` (Phase 9) is consumed instead: cleared back to null the moment it's used to make one selection, so the *next* exhaustion pauses and asks again, rather than getting permanently stuck pinned to whatever just failed. */
+  pinnedProviderSticky: boolean;
   /** Every provider this task may ever hand off to, in priority order — defaults to `["codex", "claude"]` for byte-for-byte-identical behavior with every task created before a third provider existed. A provider has to be listed here to ever be selected, pinned or not. */
   enabledProviders: SessionProvider[];
   /** Set by `selecting_provider`, consumed by `handing_off` in the same leg — which provider was just chosen. */
   pendingDestination: SessionProvider | null;
+  /** Phase 9: set by `selecting_provider` whenever no `pinnedProvider` is set yet — the task pauses (`paused_approval`) and this lists every enabled alternative a human may pick via `resume(taskId, { pin })`. Cleared the moment a pin is supplied. Distinguishes this pause reason from `paused_approval`'s other causes (unconfirmed ownership, failed validation). */
+  pendingProviderChoice: SessionProvider[] | null;
   failureReason: string | null;
   lastOutcome: ExecutionOutcome | null;
   /** The last leg's overall `HandoffRecord.status` (e.g. "completed"/"failed_validation"/"interrupted") — `lastOutcome` alone can't distinguish "failed_validation" from "completed", since both have outcome.kind === "completed". */

@@ -160,8 +160,10 @@ export class AutomaticHandoffCoordinator {
       cooldowns: {},
       validationCommands: options.validationCommands ?? [],
       pinnedProvider: options.pinnedProvider ?? null,
+      pinnedProviderSticky: options.pinnedProvider != null,
       enabledProviders: options.enabledProviders ?? ["codex", "claude"],
       pendingDestination: null,
+      pendingProviderChoice: null,
       failureReason: null,
       lastOutcome: null,
       lastHandoffStatus: null,
@@ -171,14 +173,14 @@ export class AutomaticHandoffCoordinator {
     return { state: initial, settled: false };
   }
 
-  /** Resuming a `paused_exhausted` task re-checks that provider's cooldown first — the pause is only lifted when the availability policy now permits it, not unconditionally. Resuming `paused_approval` always proceeds: calling this IS the human approval. */
-  async resume(taskId: string, options: { suppliedObjective?: string; signal?: AbortSignal } = {}): Promise<AutoTaskState> {
-    const { state, settled } = await this.prepareResume(taskId);
+  /** Resuming a `paused_exhausted` task re-checks that provider's cooldown first — the pause is only lifted when the availability policy now permits it, not unconditionally. Resuming `paused_approval` always proceeds: calling this IS the human approval. Phase 9: `pin` supplies the destination choice for a task paused on `pendingProviderChoice` — omitted, a task paused that way will simply pause again on the next `selecting_provider` step, since nothing picked a destination. */
+  async resume(taskId: string, options: { suppliedObjective?: string; signal?: AbortSignal; pin?: SessionProvider } = {}): Promise<AutoTaskState> {
+    const { state, settled } = await this.prepareResume(taskId, options.pin);
     return settled ? state : this.continueFrom(state, options);
   }
 
   /** Phase 4's non-blocking resume path — same split as `prepareStart`/`continueFrom`, for the same reason. */
-  async prepareResume(taskId: string): Promise<{ state: AutoTaskState; settled: boolean }> {
+  async prepareResume(taskId: string, pin?: SessionProvider): Promise<{ state: AutoTaskState; settled: boolean }> {
     const state = await this.store.loadAutoTask(taskId);
     if (!state) throw new Error(`no automatic task state found for "${taskId}"`);
     if (!PAUSED_STATES.has(state.state)) return { state, settled: true };
@@ -188,7 +190,7 @@ export class AutomaticHandoffCoordinator {
       // with more than two enabled providers, one being free is enough for
       // the real selection logic (inside the loop this resume re-enters)
       // to pick it; this is just a fast-fail courtesy, not the real check.
-      const candidates = state.pendingDestination ? [state.pendingDestination] : candidateProviders(state.currentProvider!, state.enabledProviders ?? ["codex", "claude"], state.pinnedProvider);
+      const candidates = state.pendingDestination ? [state.pendingDestination] : candidateProviders(state.currentProvider!, state.enabledProviders ?? ["codex", "claude"], pin ?? state.pinnedProvider);
       const stillBlocked = candidates.length > 0 && candidates.every((c) => isOnCooldown(state.cooldowns[c]));
       if (stillBlocked) {
         const first = candidates[0]!;
@@ -200,7 +202,8 @@ export class AutomaticHandoffCoordinator {
     // Re-enters at the top of the per-leg cycle (not straight back into
     // "selecting_provider") so ownership is re-checked fresh, not
     // assumed still valid just because the user asked to resume.
-    const resumed = this.transition(state, "running", state.currentProvider, "resumed by user");
+    const withPin = pin ? { ...state, pinnedProvider: pin, pinnedProviderSticky: false, pendingProviderChoice: null } : state;
+    const resumed = this.transition(withPin, "running", withPin.currentProvider, pin ? `resumed by user, pinned to ${pin}` : "resumed by user");
     await this.store.saveAutoTask(resumed);
     return { state: resumed, settled: false };
   }
@@ -309,6 +312,19 @@ export class AutomaticHandoffCoordinator {
       return { ...this.transition(state, "failed", null, reason), failureReason: reason };
     }
 
+    // Phase 9: with no pin, this never auto-picks — it always stops and
+    // asks which enabled provider to continue on next, every leg, not
+    // just on exhaustion. `resume(taskId, { pin })` is what supplies the
+    // choice; once a pin exists (here, or from `auto start --pin`), this
+    // falls through to the exact same selection logic as before.
+    if (!state.pinnedProvider) {
+      const candidates = candidateProviders(state.currentProvider!, state.enabledProviders, null);
+      if (candidates.length === 0) {
+        return this.transition(state, "paused_approval", state.currentProvider, "no other enabled provider is configured as an alternative");
+      }
+      return this.transition({ ...state, pendingProviderChoice: candidates }, "paused_approval", state.currentProvider, `awaiting a destination choice among: ${candidates.join(", ")}`);
+    }
+
     const selection = await selectAlternativeProvider(
       state.currentProvider!,
       state.pinnedProvider,
@@ -334,7 +350,16 @@ export class AutomaticHandoffCoordinator {
       ...state.unknownAttemptsByProvider,
       [selection.provider]: selection.status?.classification === "unknown" ? priorUnknownAttempts + 1 : 0,
     };
-    const withSelection: AutoTaskState = { ...state, pendingDestination: selection.provider, unknownAttemptsByProvider: nextUnknownAttempts };
+    // A one-time `resume(..., { pin })` choice is consumed here — cleared
+    // so the *next* exhaustion pauses and asks again instead of staying
+    // stuck pinned to whatever just failed. A standing `auto start --pin`
+    // is never cleared.
+    const withSelection: AutoTaskState = {
+      ...state,
+      pendingDestination: selection.provider,
+      unknownAttemptsByProvider: nextUnknownAttempts,
+      ...(state.pinnedProviderSticky ? null : { pinnedProvider: null }),
+    };
     return this.transition(withSelection, "handing_off", selection.provider, selection.reason);
   }
 

@@ -1,5 +1,20 @@
 # Phase 3A — Automatic Handoff Orchestration
 
+> **Updated by Phase 9** (see
+> [`docs/PROVIDER_CHOICE_NOTIFICATIONS.md`](PROVIDER_CHOICE_NOTIFICATIONS.md)):
+> `selectAndAdvance()` no longer auto-picks "the other provider" the
+> moment one becomes available. With no `pinnedProvider` set, it now
+> always pauses (`paused_approval`, `pendingProviderChoice` populated)
+> and waits for an explicit `agent-relay auto resume <task-id> --pin
+> <provider>` — every leg, not just when every candidate is exhausted.
+> This is a deliberate, breaking change to this phase's original
+> "picks an eligible alternative provider" behavior below, driven by a
+> real request: the user wants to be asked and to choose, not have the
+> coordinator decide silently. A standing `auto start --pin <provider>`
+> is unaffected — it still never pauses to ask, exactly as described
+> here. Everything else on this page (ownership, locking, outcome
+> classification, persistence, resumability) is unchanged.
+
 Goal: when a Relay-managed worker runs out of usage, crashes, or becomes
 unavailable mid-task, automatically hand its unfinished work to the other
 provider — using the exact same `HandoffEngine` safety machinery Phases

@@ -33,8 +33,11 @@ test("aborting with reason 'stop' while an agent is executing ends the task 'sto
     const codex = blockingUntilAbortedAdapter("codex");
     const coordinator = new AutomaticHandoffCoordinator({ store: ctx.store, adapters: { codex }, getUsageStatus: usageMap({ claude: AVAILABLE, codex: AVAILABLE }), checkProviderActivity: async () => CONFIRMED_IDLE });
 
+    const paused = await coordinator.start(taskId);
+    assert.deepEqual(paused.pendingProviderChoice, ["codex"]);
+
     const controller = new AbortController();
-    const statePromise = coordinator.start(taskId, { signal: controller.signal });
+    const statePromise = coordinator.resume(taskId, { pin: "codex", signal: controller.signal });
     await new Promise((resolve) => setTimeout(resolve, 20));
     controller.abort("stop");
 
@@ -56,19 +59,22 @@ test("aborting with reason 'pause' while an agent is executing ends the task 'pa
       checkProviderActivity: async () => CONFIRMED_IDLE,
     });
 
+    const paused = await coordinator.start(taskId);
+    assert.deepEqual(paused.pendingProviderChoice, ["codex"]);
+
     const controller = new AbortController();
-    const statePromise = coordinator.start(taskId, { signal: controller.signal });
+    const statePromise = coordinator.resume(taskId, { pin: "codex", signal: controller.signal });
     await new Promise((resolve) => setTimeout(resolve, 20));
     controller.abort("pause");
-    const paused = await statePromise;
-    assert.equal(paused.state, "paused_approval");
-    assert.equal(paused.lastOutcome?.kind, "cancelled");
+    const cancelled = await statePromise;
+    assert.equal(cancelled.state, "paused_approval");
+    assert.equal(cancelled.lastOutcome?.kind, "cancelled");
 
-    // Resuming a "paused_approval" task re-checks ownership and selects a
-    // provider fresh, same as resuming any other paused_approval task —
-    // pausing mid-execution isn't special-cased into resuming the exact
-    // same destination session, only into reaching this distinct state.
-    const resumed = await coordinator.resume(taskId);
+    // Resuming a "paused_approval" task re-checks ownership and re-enters
+    // selecting_provider fresh — with no pin left (consumed by the attempt
+    // above), it would just pause and ask again, so this resume supplies
+    // the next destination explicitly, same as any other provider choice.
+    const resumed = await coordinator.resume(taskId, { pin: "claude" });
     assert.equal(resumed.state, "completed");
     assert.equal(claude.calls.length, 1);
   });
@@ -79,7 +85,9 @@ test("a plain stop() on a paused task (nothing in flight in this process) still 
     const { taskId } = await setupAutoTask(ctx.store, ctx.repoRoot, "claude");
     const resetsAt = Math.floor(Date.now() / 1000) + 3600;
     const coordinator = new AutomaticHandoffCoordinator({ store: ctx.store, getUsageStatus: usageMap({ claude: { classification: "exhausted", observedAt: Date.now(), primary: null, secondary: null }, codex: { classification: "exhausted", observedAt: Date.now(), primary: { usedPercent: 100, resetsAt }, secondary: null } }) });
-    const pausedExhausted = await coordinator.start(taskId);
+    const paused = await coordinator.start(taskId);
+    assert.deepEqual(paused.pendingProviderChoice, ["codex"]);
+    const pausedExhausted = await coordinator.resume(taskId, { pin: "codex" });
     assert.equal(pausedExhausted.state, "paused_exhausted");
 
     const state = await coordinator.stop(taskId);

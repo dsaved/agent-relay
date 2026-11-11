@@ -43,6 +43,14 @@ test("recovery resumes a task left mid-flight with no recorded workspace lock at
     const decisions = await runCrashRecovery(ctx.store, scheduler, ctx.lockManager, undefined);
     assert.equal(decisions.find((d) => d.taskId === taskId)?.decision, "resumed");
 
+    // Phase 9: `submit()`'s recovery-driven run only ever reaches the
+    // first pause-and-ask — it never auto-picks a destination.
+    while (scheduler.isRunning(taskId)) await new Promise((resolve) => setTimeout(resolve, 5));
+    const paused = await ctx.store.loadAutoTask(taskId);
+    assert.equal(paused?.state, "paused_approval");
+    assert.deepEqual(paused?.pendingProviderChoice, ["codex"]);
+
+    await scheduler.resume(taskId, undefined, "codex");
     while (scheduler.isRunning(taskId)) await new Promise((resolve) => setTimeout(resolve, 5));
     const final = await ctx.store.loadAutoTask(taskId);
     assert.equal(final?.state, "completed");
@@ -65,6 +73,8 @@ test("recovery resumes a task whose recorded lock holder is confirmed dead — n
     assert.equal(decision?.decision, "resumed");
     assert.match(decision?.reason ?? "", /confirmed dead/);
 
+    while (scheduler.isRunning(taskId)) await new Promise((resolve) => setTimeout(resolve, 5));
+    await scheduler.resume(taskId, undefined, "codex");
     while (scheduler.isRunning(taskId)) await new Promise((resolve) => setTimeout(resolve, 5));
     assert.equal(codex.calls.length, 1);
   });
@@ -108,6 +118,8 @@ test("recovery skips a corrupted task-state file without crashing startup, and s
     assert.equal(decisions.find((d) => d.taskId === goodTaskId)?.decision, "resumed");
 
     while (scheduler.isRunning(goodTaskId)) await new Promise((resolve) => setTimeout(resolve, 5));
+    await scheduler.resume(goodTaskId, undefined, "codex");
+    while (scheduler.isRunning(goodTaskId)) await new Promise((resolve) => setTimeout(resolve, 5));
     assert.equal(codex.calls.length, 1);
   });
 });
@@ -118,7 +130,10 @@ test("already-settled tasks are left alone, never re-executed, by recovery", asy
     const codex = new FakeExecutionAdapter("codex", () => fakeResult("codex", { sessionId: "codex-once-more" }));
     const coordinator = new AutomaticHandoffCoordinator({ store: ctx.store, adapters: { codex }, getUsageStatus: usageMap({ claude: AVAILABLE, codex: AVAILABLE }), checkProviderActivity: async () => CONFIRMED_IDLE });
     const scheduler = new TaskScheduler(coordinator, ctx.store, 4);
-    await coordinator.start(taskId); // runs to completion, settles
+    const paused = await coordinator.start(taskId);
+    assert.deepEqual(paused.pendingProviderChoice, ["codex"]);
+    const completed = await coordinator.resume(taskId, { pin: "codex" }); // runs to completion, settles
+    assert.equal(completed.state, "completed");
 
     const decisions = await runCrashRecovery(ctx.store, scheduler, ctx.lockManager, undefined);
     assert.equal(decisions.find((d) => d.taskId === taskId)?.decision, "left_alone");

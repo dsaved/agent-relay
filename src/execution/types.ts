@@ -90,6 +90,8 @@ export interface LiveOpenResult {
   command: string[];
   /** Only set when `resumeSessionId` was passed through — there's no way to learn an id from a detached GUI launch of a brand-new session. */
   sessionId: string | null;
+  /** True only when the instruction was actually delivered into the destination (e.g. a successful `codex queue`). False means the app was opened/brought forward but the instruction still needs to be pasted in by hand — confirmed live for Claude: `--desktop` flatly refuses a prompt argument ("--desktop doesn't take a prompt yet. Run `claude --desktop`, then type it in the app."). */
+  seeded: boolean;
   detail: string;
 }
 

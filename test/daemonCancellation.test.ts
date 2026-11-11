@@ -27,24 +27,17 @@ function blockingUntilAbortedAdapter(provider: "claude" | "codex"): FakeExecutio
   });
 }
 
-test("submit() is non-blocking: it returns while the task is still genuinely running in the background", async () => {
-  await withEnv(async (ctx) => {
-    const { taskId } = await setupAutoTask(ctx.store, ctx.repoRoot, "claude");
-    const codex = blockingUntilAbortedAdapter("codex");
-    const coordinator = new AutomaticHandoffCoordinator({ store: ctx.store, adapters: { codex }, getUsageStatus: usageMap({ claude: AVAILABLE, codex: AVAILABLE }), checkProviderActivity: async () => CONFIRMED_IDLE });
-    const scheduler = new TaskScheduler(coordinator, ctx.store, 4);
+/** Phase 9: `submit()` alone only ever reaches the first pause-and-ask — it never runs an adapter. Waits for that settlement so a test can then `resume(taskId, undefined, pin)` to actually kick off execution. */
+async function waitUntilSettled(scheduler: TaskScheduler, taskId: string): Promise<void> {
+  while (scheduler.isRunning(taskId)) await new Promise((resolve) => setTimeout(resolve, 5));
+}
 
-    const submitted = await scheduler.submit(taskId);
-    assert.equal(submitted.running, true);
-    assert.notEqual(submitted.state.state, "completed");
-    assert.ok(scheduler.isRunning(taskId));
+/** `requestStop()`/`requestPause()` resolve as soon as the underlying run settles — `inFlight` cleanup is a separate, detached microtask chain (so notification side effects never delay the caller), so `isRunning()` can still read `true` for an instant afterward. Poll rather than assert synchronously. */
+async function waitUntilNotRunning(scheduler: TaskScheduler, taskId: string): Promise<void> {
+  for (let i = 0; i < 100 && scheduler.isRunning(taskId); i++) await new Promise((resolve) => setTimeout(resolve, 5));
+}
 
-    await scheduler.requestStop(taskId);
-    assert.equal(scheduler.isRunning(taskId), false);
-  });
-});
-
-test("submit() on an already-in-flight task returns the current recorded state without starting a duplicate worker", async () => {
+test("submit() is non-blocking, and a resumed provider choice keeps running genuinely in the background", async () => {
   await withEnv(async (ctx) => {
     const { taskId } = await setupAutoTask(ctx.store, ctx.repoRoot, "claude");
     const codex = blockingUntilAbortedAdapter("codex");
@@ -52,12 +45,35 @@ test("submit() on an already-in-flight task returns the current recorded state w
     const scheduler = new TaskScheduler(coordinator, ctx.store, 4);
 
     await scheduler.submit(taskId);
-    await scheduler.submit(taskId); // must not start a second worker
+    await waitUntilSettled(scheduler, taskId);
+    const paused = await ctx.store.loadAutoTask(taskId);
+    assert.equal(paused!.state, "paused_approval");
+    assert.deepEqual(paused!.pendingProviderChoice, ["codex"]);
 
-    // The in-flight run reaches the actual adapter call asynchronously
-    // (several awaited steps after submit() itself returns) — wait for
-    // that to happen, then confirm the second submit() never added a
-    // second one.
+    const resumed = await scheduler.resume(taskId, undefined, "codex");
+    assert.equal(resumed.running, true);
+    assert.notEqual(resumed.state.state, "completed");
+    assert.ok(scheduler.isRunning(taskId));
+
+    await scheduler.requestStop(taskId);
+    await waitUntilNotRunning(scheduler, taskId);
+    assert.equal(scheduler.isRunning(taskId), false);
+  });
+});
+
+test("resume() on an already-in-flight task returns the current recorded state without starting a duplicate worker", async () => {
+  await withEnv(async (ctx) => {
+    const { taskId } = await setupAutoTask(ctx.store, ctx.repoRoot, "claude");
+    const codex = blockingUntilAbortedAdapter("codex");
+    const coordinator = new AutomaticHandoffCoordinator({ store: ctx.store, adapters: { codex }, getUsageStatus: usageMap({ claude: AVAILABLE, codex: AVAILABLE }), checkProviderActivity: async () => CONFIRMED_IDLE });
+    const scheduler = new TaskScheduler(coordinator, ctx.store, 4);
+
+    await scheduler.submit(taskId);
+    await waitUntilSettled(scheduler, taskId);
+
+    await scheduler.resume(taskId, undefined, "codex");
+    await scheduler.resume(taskId, undefined, "codex"); // must not start a second worker
+
     for (let i = 0; i < 50 && codex.calls.length === 0; i++) await new Promise((resolve) => setTimeout(resolve, 10));
     assert.equal(codex.calls.length, 1, "no duplicate execution for an already-running task");
 
@@ -73,8 +89,12 @@ test("requestPause/requestStop actually interrupt a genuinely in-flight run (not
     const scheduler = new TaskScheduler(coordinator, ctx.store, 4);
 
     await scheduler.submit(taskId);
+    await waitUntilSettled(scheduler, taskId);
+    await scheduler.resume(taskId, undefined, "codex");
+
     const final = await scheduler.requestStop(taskId);
     assert.equal(final.state, "stopped");
+    await waitUntilNotRunning(scheduler, taskId);
     assert.equal(scheduler.isRunning(taskId), false);
   });
 });
@@ -86,10 +106,10 @@ test("requestPause/requestStop fall through to the coordinator's direct store mu
     const coordinator = new AutomaticHandoffCoordinator({ store: ctx.store, adapters: { codex }, getUsageStatus: usageMap({ claude: AVAILABLE, codex: AVAILABLE }), checkProviderActivity: async () => CONFIRMED_IDLE });
     const scheduler = new TaskScheduler(coordinator, ctx.store, 4);
 
-    const submitted = await scheduler.submit(taskId);
-    // Wait for the quick, non-blocking fake run to settle and leave the in-flight map on its own.
-    while (scheduler.isRunning(taskId)) await new Promise((resolve) => setTimeout(resolve, 5));
-    void submitted;
+    await scheduler.submit(taskId);
+    await waitUntilSettled(scheduler, taskId);
+    await scheduler.resume(taskId, undefined, "codex");
+    await waitUntilSettled(scheduler, taskId);
 
     // Nothing tracked now — this must route straight to coordinator.pause(), not throw.
     const paused = await scheduler.requestPause(taskId);
@@ -106,6 +126,9 @@ test("the scheduler refuses a new submission past the configured maxConcurrentTa
     const scheduler = new TaskScheduler(coordinator, ctx.store, 1);
 
     await scheduler.submit(taskA);
+    await waitUntilSettled(scheduler, taskA);
+    await scheduler.resume(taskA, undefined, "codex"); // now genuinely blocked on the adapter, occupying the one slot
+
     await assert.rejects(() => scheduler.submit(taskB), /maximum of 1 concurrent/);
     await scheduler.requestStop(taskA);
   });

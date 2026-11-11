@@ -17,6 +17,7 @@ export function formatAutoTaskState(state: AutoTaskState): string {
       lines.push(`    ${provider}: until ${new Date(cooldown!.until).toISOString()} (${cooldown!.reason})`);
     }
   }
+  if (state.pendingProviderChoice) lines.push(`  awaiting destination choice: ${state.pendingProviderChoice.join(", ")} — resume with \`auto resume ${state.taskId} --pin <provider>\``);
   if (state.failureReason) lines.push(`  failure reason: ${state.failureReason}`);
   if (state.lastOutcome) lines.push(`  last outcome: ${state.lastOutcome.kind}${state.lastOutcome.detail ? ` (${state.lastOutcome.detail})` : ""}`);
   return lines.join("\n");

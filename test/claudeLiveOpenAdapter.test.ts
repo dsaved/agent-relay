@@ -3,27 +3,30 @@ import assert from "node:assert/strict";
 import { ClaudeLiveOpenAdapter } from "../src/execution/claudeLiveOpenAdapter.js";
 import type { LaunchDetachedResult } from "../src/execution/launchDetached.js";
 
-function fakeLaunch(result: LaunchDetachedResult) {
+function fakeLaunch(result: Partial<LaunchDetachedResult>) {
   const calls: { command: string; args: string[]; cwd: string }[] = [];
-  return { fn: async (opts: { command: string; args: string[]; cwd: string }) => (calls.push(opts), result), calls };
+  const full: LaunchDetachedResult = { launched: true, pid: 1, error: null, ...result };
+  return { fn: async (opts: { command: string; args: string[]; cwd: string }) => (calls.push(opts), full), calls };
 }
 
-test("ClaudeLiveOpenAdapter: a brand-new session builds `claude --desktop <instruction>`, no --resume", async () => {
+test("ClaudeLiveOpenAdapter: a brand-new session builds `claude --desktop`, with no --resume and no prompt (live-confirmed: --desktop rejects a prompt)", async () => {
   const launch = fakeLaunch({ launched: true, pid: 1, error: null });
   const adapter = new ClaudeLiveOpenAdapter(launch.fn);
   const result = await adapter.open({ cwd: "/repo", instruction: "do the thing" });
-  assert.deepEqual(launch.calls[0], { command: "claude", args: ["--desktop", "do the thing"], cwd: "/repo" });
-  assert.deepEqual(result.command, ["claude", "--desktop", "do the thing"]);
+  assert.deepEqual(launch.calls[0], { command: "claude", args: ["--desktop"], cwd: "/repo" });
+  assert.deepEqual(result.command, ["claude", "--desktop"]);
   assert.equal(result.sessionId, null);
   assert.equal(result.launched, true);
+  assert.equal(result.seeded, false);
 });
 
-test("ClaudeLiveOpenAdapter: resuming an existing session adds --resume <id> before the instruction", async () => {
+test("ClaudeLiveOpenAdapter: resuming an existing session adds --resume <id>, still no prompt", async () => {
   const launch = fakeLaunch({ launched: true, pid: 1, error: null });
   const adapter = new ClaudeLiveOpenAdapter(launch.fn);
   const result = await adapter.open({ cwd: "/repo", instruction: "continue", resumeSessionId: "sess-123" });
-  assert.deepEqual(launch.calls[0]!.args, ["--desktop", "--resume", "sess-123", "continue"]);
+  assert.deepEqual(launch.calls[0]!.args, ["--desktop", "--resume", "sess-123"]);
   assert.equal(result.sessionId, "sess-123");
+  assert.equal(result.seeded, false);
 });
 
 test("ClaudeLiveOpenAdapter: a failed launch is reported honestly, not as success", async () => {

@@ -945,12 +945,25 @@ Full writeup lives in [`docs/LIVE_HANDOFF.md`](LIVE_HANDOFF.md). Summary:
   there's nothing to wait for once a window opens. It does wait one short
   grace period for Node's own async spawn-error event, so a missing CLI
   binary is never reported as "launched."
-- **Still `UNVERIFIED`**: whether `--desktop` really accepts a prompt
-  together with `--resume`, whether `codex app <path>` auto-attaches to
-  an existing thread for that path, and whether `codex queue` requires
-  the shared app-server daemon already running. A separate, explicit
-  live-verification step follows this phase, same gate every live call in
-  this project's history has gone through.
+- **Live-verified, same day, by the user**: `claude --desktop` flatly
+  refuses a prompt argument (`--desktop doesn't take a prompt yet. Run
+  \`claude --desktop\`, then type it in the app.`) — the Desktop app was
+  already installed and running, so that wasn't the blocker. Fixed:
+  `ClaudeLiveOpenAdapter` never sends the instruction as an argument,
+  `LiveOpenResult` gained a `seeded` field, and `handoff open` now prints
+  the instruction text for the person to paste in by hand whenever
+  nothing could seed it (true for every Claude open, and for a Codex
+  open with no existing thread). A second live round found the deeper
+  cause: `--desktop` refuses to run at all with redirected stdio
+  (`--desktop opens the Claude Desktop app and can't run
+  non-interactively ... or redirected output`) — `launchDetached` was
+  piping/ignoring it to capture errors, which triggered the refusal.
+  Fixed by switching to `stdio: "inherit"`. **Confirmed working
+  end-to-end on a real repo**: the Claude Desktop window genuinely opens,
+  on its own fresh worktree, with the printed instruction pasted in
+  manually as designed. Still `UNVERIFIED`: whether `codex app <path>`
+  auto-attaches to an existing thread for that path, and whether `codex
+  queue` requires the shared app-server daemon already running.
 - 12 new tests — `test/launchDetached.test.ts`,
   `test/claudeLiveOpenAdapter.test.ts`, `test/codexLiveOpenAdapter.test.ts`,
   `test/handoffOpen.test.ts` — all against fakes/injected functions; no
@@ -969,3 +982,78 @@ npm run test          # tsc build + node --test — PASS (253/253: 241 pre-exist
 the live-open adapters and `openHandoffLive`'s safety model, none of
 which ever opens a real app or spawns a real `claude`/`codex`/`copilot`
 process.
+
+## Phase 9 — Provider-Choice Notifications for Automatic Handoff
+
+Full writeup lives in
+[`docs/PROVIDER_CHOICE_NOTIFICATIONS.md`](PROVIDER_CHOICE_NOTIFICATIONS.md).
+Summary:
+
+- **A real, deliberate, breaking change to this project's flagship
+  feature's default behavior**, driven directly by a user request:
+  `selectAndAdvance()` (`src/auto/coordinator.ts`) no longer silently
+  auto-picks the next enabled provider — it always pauses
+  (`paused_approval`, new `pendingProviderChoice` field) and waits for an
+  explicit `agent-relay auto resume <task-id> --pin <provider>`, every
+  leg, not just when every candidate is exhausted. A standing `auto start
+  --pin <provider>` is unaffected — still never pauses to ask, exactly as
+  before.
+- **A one-time resume pin is consumed, not sticky**: a real design gap
+  was caught before shipping — if a `resume({ pin })` choice stayed set
+  forever, the *next* exhaustion would be stuck pinned to whatever just
+  failed (since it would now equal `currentProvider`). Fixed with a new
+  `pinnedProviderSticky` field distinguishing a standing `auto start
+  --pin` (never cleared) from a one-time resume pin (cleared the moment
+  it's consumed).
+- **A real OS notification, daemon-only, via `terminal-notifier`** (a
+  new, separately-installed macOS CLI — not an npm dependency, not
+  installed on this machine; macOS's own `osascript -e 'display
+  notification'` cannot show custom action buttons at all). Detected the
+  same honest way `claude`/`codex`/`copilot` already are — absence
+  degrades to no popup, never a failure. The exact `-actions`/`-json`
+  response shape is `UNVERIFIED` pending `brew install terminal-notifier`
+  and a live test.
+- **A second re-entrancy bug was caught and fixed during testing, not
+  after shipping**: the scheduler's own notification side effects
+  (`TaskScheduler.handleSettled()`) were chained in a way that raced
+  against `inFlight` cleanup twice — first, a notification's own latency
+  could delay `requestStop()`/`requestPause()` seeing the task as no
+  longer running; second, and more seriously, a recursive
+  `this.resume()` call (made when a notification actually picks a
+  provider) could see the task as "still in flight" and silently no-op
+  instead of resuming it, because the cleanup hadn't run yet. Both fixed
+  by moving `inFlight.delete()` to run synchronously, first, in both the
+  fulfilled and rejected branches, with notification logic kicked off
+  only after.
+- **Seeding still only ever works via a real headless turn** (Phase 8's
+  finding, reused unchanged): once a destination is picked, the existing
+  `handOffAndAdvance()`/`HandoffEngine.executeHandoff()` path runs it for
+  real; `handoff open` (Phase 8) stays the separate, manual step to
+  actually view it, per the choice made for this phase (no auto-opening).
+- **Large, deliberate test-suite rewrite, not an additive one**: every
+  pre-existing scenario across `test/autoCoordinator.test.ts`,
+  `test/autoCoordinatorCancellation.test.ts`, `test/daemonCancellation.test.ts`,
+  `test/daemonRecovery.test.ts`, and `test/integrationLifecycle.test.ts`
+  (the real end-to-end daemon test) that used to complete automatically
+  within one `start()` call was restructured to the new
+  pause-then-`resume({ pin })` shape — none of their underlying
+  guarantees (crash recovery, cancellation, no-duplicate-execution,
+  workspace preservation) changed, confirmed by running each rewritten
+  scenario individually against the new behavior before the full suite.
+- 14 new tests — `test/providerChoicePause.test.ts`,
+  `test/terminalNotifier.test.ts`, `test/schedulerNotifications.test.ts`
+  — plus the rewritten files above, all against fakes/injected functions;
+  no real `terminal-notifier` process is ever spawned by the suite.
+
+### Verification run (Phase 0 through 9)
+
+```
+npm run typecheck     # tsc --noEmit — PASS
+npm run lint          # eslint src test — PASS
+npm run build         # tsc — PASS
+npm run test          # tsc build + node --test — PASS (267/267)
+```
+
+267 tests total: 253 from Phase 8 (several rewritten in place, none
+dropped) plus 14 new proving the provider-choice pause, the one-time-pin
+consumption, and the notification wiring.

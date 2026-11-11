@@ -3,6 +3,7 @@ import { defaultStoreRoot } from "../handoff/store.js";
 import { HandoffStore } from "../handoff/store.js";
 import { WorkspaceLockManager } from "../handoff/lock.js";
 import { AutomaticHandoffCoordinator, type StartAutoTaskOptions } from "../auto/coordinator.js";
+import type { SessionProvider } from "../sessions/types.js";
 import { CodexUsageMonitor } from "../codex/usageMonitor.js";
 import { ClaudeUsageMonitor } from "../claude/usageMonitor.js";
 import { DesktopRegistry } from "../desktop/registry.js";
@@ -65,7 +66,10 @@ function buildHandlers(deps: {
       const options = (args as { taskId: string; options?: StartAutoTaskOptions } | undefined)?.options ?? {};
       return deps.scheduler.submit(asTaskId(args), options);
     },
-    autoResume: async (args) => deps.scheduler.resume(asTaskId(args), (args as { suppliedObjective?: string } | undefined)?.suppliedObjective),
+    autoResume: async (args) => {
+      const a = args as { suppliedObjective?: string; pin?: SessionProvider } | undefined;
+      return deps.scheduler.resume(asTaskId(args), a?.suppliedObjective, a?.pin);
+    },
     autoPause: async (args) => deps.scheduler.requestPause(asTaskId(args)),
     autoStop: async (args) => deps.scheduler.requestStop(asTaskId(args)),
     autoStatus: async (args) => deps.store.loadAutoTask(asTaskId(args)),

@@ -195,14 +195,51 @@ test(
       assert.equal(submitResult.exitCode, 0, `auto start must be accepted: ${submitResult.stdout}\n${submitResult.stderr}`);
       assert.match(submitResult.stdout, /Accepted by the daemon/);
 
+      // Phase 9: automatic supervision never auto-picks a destination —
+      // it always pauses and asks first, even for the very first leg.
+      // Task A's source is "codex", so the only enabled alternative is
+      // "claude"; pin it to proceed with the real (fake-shadowed) claude
+      // execution the rest of this test depends on.
+      let pendingChoiceText = "";
+      const reachedPendingChoice = await waitFor(async () => {
+        const status = await runCli(binPath, ["auto", "status", taskA.taskId], env, outsideCwd);
+        pendingChoiceText = status.stdout;
+        return parseState(status.stdout) === "paused_approval";
+      }, 15_000);
+      assert.ok(reachedPendingChoice, `task A must pause asking for a provider choice before any execution: ${pendingChoiceText}`);
+      assert.match(pendingChoiceText, /awaiting destination choice: claude/);
+
+      const pinClaude = await runCli(binPath, ["auto", "resume", taskA.taskId, "--pin", "claude"], env, outsideCwd);
+      assert.equal(pinClaude.exitCode, 0, `auto resume --pin claude must be accepted: ${pinClaude.stdout}`);
+
       assert.ok(await waitFor(async () => (await countPidLines(cli.pidsLogPath)) > pidCountBeforeA, 15_000), "the fake claude process must have been invoked for task A's real execution leg, not just setup's own detection calls");
 
       const pauseResult = await runCli(binPath, ["auto", "pause", taskA.taskId], env, outsideCwd);
       assert.equal(parseState(pauseResult.stdout), "paused_approval", `pausing an in-flight run must reach paused_approval: ${pauseResult.stdout}`);
 
       await rm(cli.sleepGatePath, { force: true });
-      const resumeResult = await runCli(binPath, ["auto", "resume", taskA.taskId], env, outsideCwd);
-      assert.equal(resumeResult.exitCode, 0, `auto resume must be accepted: ${resumeResult.stdout}`);
+      // The pin that selected claude was consumed the moment it was used
+      // (Phase 9: a one-time resume pin is cleared after one selection,
+      // not sticky) — resuming a mid-execution pause re-enters
+      // selecting_provider fresh, with currentProvider now "claude", so
+      // it pauses again asking about "codex". The shadow codex binary
+      // always reports a simulated crash (see fakeCliBin.ts), which
+      // bounces straight back to asking about "claude" again — this time
+      // completing for real, since the sleep gate is gone.
+      const pinCodex = await runCli(binPath, ["auto", "resume", taskA.taskId, "--pin", "codex"], env, outsideCwd);
+      assert.equal(pinCodex.exitCode, 0, `auto resume --pin codex must be accepted: ${pinCodex.stdout}`);
+
+      let pendingChoiceText2 = "";
+      const reachedSecondChoice = await waitFor(async () => {
+        const status = await runCli(binPath, ["auto", "status", taskA.taskId], env, outsideCwd);
+        pendingChoiceText2 = status.stdout;
+        return parseState(status.stdout) === "paused_approval";
+      }, 15_000);
+      assert.ok(reachedSecondChoice, `task A must pause again asking about claude after codex's simulated crash: ${pendingChoiceText2}`);
+      assert.match(pendingChoiceText2, /awaiting destination choice: claude/);
+
+      const resumeResult = await runCli(binPath, ["auto", "resume", taskA.taskId, "--pin", "claude"], env, outsideCwd);
+      assert.equal(resumeResult.exitCode, 0, `auto resume --pin claude must be accepted: ${resumeResult.stdout}`);
 
       let lastStatusText = "";
       const reachedCompleted = await waitFor(async () => {
@@ -223,6 +260,16 @@ test(
       await writeFile(cli.sleepGatePath, "sleep");
       const submitB = await runCli(binPath, ["auto", "start", taskB.taskId, "--allow-unknown-availability"], env, outsideCwd);
       assert.equal(submitB.exitCode, 0);
+
+      // Phase 9: task B's source is also "codex", so this too pauses
+      // asking about "claude" before any execution — pin it to reach the
+      // real (fake-shadowed) in-flight execution the crash simulation below needs.
+      assert.ok(
+        await waitFor(async () => parseState((await runCli(binPath, ["auto", "status", taskB.taskId], env, outsideCwd)).stdout) === "paused_approval", 15_000),
+        "task B must pause asking for a provider choice before any execution",
+      );
+      const pinClaudeB = await runCli(binPath, ["auto", "resume", taskB.taskId, "--pin", "claude"], env, outsideCwd);
+      assert.equal(pinClaudeB.exitCode, 0, `auto resume --pin claude must be accepted for task B: ${pinClaudeB.stdout}`);
 
       const pingBeforeCrash = await pingDaemon(socketPath);
       assert.ok(pingBeforeCrash, "the daemon must be up before the simulated crash");

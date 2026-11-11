@@ -241,6 +241,7 @@ async function handoffOpenCommand(args: string[]): Promise<{ text: string; exitC
     const result = await openHandoffLive(handoffId, { to, suppliedObjective: parseFlag(args, "--objective"), forceOpenOverride: hasFlag(args, "--force-open") }, { adapters: LIVE_OPEN_ADAPTERS });
     if (result.blockedReason) return { text: `agent-relay: ${result.blockedReason}`, exitCode: 1 };
     const lines = [`ran: ${result.openResult!.command.join(" ")}`, result.openResult!.detail, "", formatHandoffRecord(result.handoff)];
+    if (!result.openResult!.seeded && result.instruction) lines.push("", "Paste this into the app once it opens:", "---", result.instruction, "---");
     if (result.desktopRecord) lines.push("", `Registered as desktop session "${result.desktopRecord.sessionId}" — see \`agent-relay desktop inspect ${result.desktopRecord.sessionId}\``);
     return { text: lines.join("\n"), exitCode: result.openResult!.launched ? 0 : 1 };
   } catch (err) {
@@ -370,13 +371,14 @@ async function autoPauseCommand(taskId: string | undefined): Promise<{ text: str
 
 async function autoResumeCommand(args: string[]): Promise<{ text: string; exitCode: number }> {
   const taskId = args[0];
-  if (!taskId) return { text: "Usage: agent-relay auto resume <task-id> [--objective \"...\"]", exitCode: 1 };
+  if (!taskId) return { text: "Usage: agent-relay auto resume <task-id> [--objective \"...\"] [--pin <claude|codex|copilot>]", exitCode: 1 };
   const suppliedObjective = parseFlag(args, "--objective");
+  const pin = parseFlag(args, "--pin") as SessionProvider | undefined;
   try {
-    const viaDaemon = await callDaemonIfRunning("autoResume", { taskId, suppliedObjective });
+    const viaDaemon = await callDaemonIfRunning("autoResume", { taskId, suppliedObjective, pin });
     if (viaDaemon.reachable) return { text: formatSubmitResult(viaDaemon.result as SubmitResult), exitCode: 0 };
 
-    const state = await new AutomaticHandoffCoordinator().resume(taskId, { suppliedObjective });
+    const state = await new AutomaticHandoffCoordinator().resume(taskId, { suppliedObjective, pin });
     return { text: formatAutoTaskState(state), exitCode: exitCodeForAutoState(state.state) };
   } catch (err) {
     return { text: `agent-relay: ${err instanceof Error ? err.message : String(err)}`, exitCode: 1 };
@@ -753,8 +755,8 @@ function printHelp(): void {
       "                                       Start/resume automatic bidirectional handoff supervision (runs in the foreground until settled).",
       "  auto status <task-id>               Show the current automatic-handoff state.",
       "  auto pause <task-id>                Pause an in-progress automatic task.",
-      "  auto resume <task-id> [--objective \"...\"]",
-      "                                       Resume a paused automatic task, if the availability policy now permits it.",
+      "  auto resume <task-id> [--objective \"...\"] [--pin <claude|codex|copilot>]",
+      "                                       Resume a paused automatic task. --pin supplies a destination choice when paused awaiting one (one-time; consumed after use).",
       "  auto stop <task-id>                 Stop an automatic task permanently.",
       "  auto history <task-id>              Show every recorded state transition for an automatic task.",
       "",

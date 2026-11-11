@@ -4,9 +4,10 @@ import { CodexLiveOpenAdapter } from "../src/execution/codexLiveOpenAdapter.js";
 import type { LaunchDetachedResult } from "../src/execution/launchDetached.js";
 import type { SpawnRunResult } from "../src/execution/spawnRun.js";
 
-function fakeLaunch(result: LaunchDetachedResult) {
+function fakeLaunch(result: Partial<LaunchDetachedResult>) {
   const calls: { command: string; args: string[]; cwd: string }[] = [];
-  return { fn: async (opts: { command: string; args: string[]; cwd: string }) => (calls.push(opts), result), calls };
+  const full: LaunchDetachedResult = { launched: true, pid: 1, error: null, ...result };
+  return { fn: async (opts: { command: string; args: string[]; cwd: string }) => (calls.push(opts), full), calls };
 }
 
 function fakeQueue(result: Partial<SpawnRunResult>) {
@@ -23,6 +24,7 @@ test("CodexLiveOpenAdapter: no resumeSessionId -> only `codex app <cwd>` fires, 
   assert.equal(queue.calls.length, 0);
   assert.deepEqual(launch.calls[0], { command: "codex", args: ["app", "/repo"], cwd: "/repo" });
   assert.equal(result.sessionId, null);
+  assert.equal(result.seeded, false);
   assert.match(result.detail, /NOT seeded/);
 });
 
@@ -35,6 +37,7 @@ test("CodexLiveOpenAdapter: with a known thread, queues the message then fires `
   assert.deepEqual(launch.calls[0], { command: "codex", args: ["app", "/repo"], cwd: "/repo" });
   assert.equal(result.sessionId, "thread-1");
   assert.equal(result.launched, true);
+  assert.equal(result.seeded, true);
 });
 
 test("CodexLiveOpenAdapter: a failing queue never fires `codex app` and is reported as not launched", async () => {
