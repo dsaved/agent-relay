@@ -75,3 +75,25 @@ test("stop() is idempotent — calling it twice never throws", async () => {
     await handle.stop();
   });
 });
+
+/**
+ * Operational-hardening fix #2: a genuine race (not just sequential
+ * start-then-start, which Phase 4 already covered) between two
+ * processes trying to start a daemon for the same state directory.
+ * Exactly one must win; the other must refuse, and there must never be
+ * two live daemons answering the same socket afterward.
+ */
+test("daemon single-instance race: two concurrent starts for the same state directory — exactly one wins", async () => {
+  await withTempStoreRoot(async (stateDir) => {
+    const results = await Promise.allSettled([startDaemon({ stateDir }), startDaemon({ stateDir })]);
+    const fulfilled = results.filter((r) => r.status === "fulfilled");
+    const rejected = results.filter((r) => r.status === "rejected");
+    assert.equal(fulfilled.length, 1, "exactly one concurrent start must succeed");
+    assert.equal(rejected.length, 1, "the other must refuse, never silently coexist");
+
+    const winner = (fulfilled[0] as PromiseFulfilledResult<Awaited<ReturnType<typeof startDaemon>>>).value;
+    const ping = await pingDaemon(winner.socketPath);
+    assert.ok(ping, "the winning daemon must actually be reachable afterward");
+    await winner.stop();
+  });
+});

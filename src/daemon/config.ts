@@ -65,3 +65,43 @@ export async function saveConfig(stateDir: string, config: DaemonConfig): Promis
   await mkdir(dirname(configPath(stateDir)), { recursive: true });
   await writeFile(configPath(stateDir), JSON.stringify(config, null, 2));
 }
+
+const KNOWN_PROVIDERS: SessionProvider[] = ["codex", "claude"];
+
+/**
+ * `agent-relay config validate` — deliberately stricter than `loadConfig`'s
+ * loose "merge over defaults" (which exists so a slightly-stale file
+ * never blocks startup): type/range checks a human edit could easily get
+ * wrong, reported as plain strings, never thrown.
+ */
+export function validateConfig(config: DaemonConfig): string[] {
+  const problems: string[] = [];
+
+  if (!Array.isArray(config.registeredProjects) || !config.registeredProjects.every((p) => typeof p === "string")) {
+    problems.push("registeredProjects must be an array of strings");
+  }
+  if (!Array.isArray(config.enabledProviders) || config.enabledProviders.length === 0 || !config.enabledProviders.every((p) => KNOWN_PROVIDERS.includes(p))) {
+    problems.push(`enabledProviders must be a non-empty array drawn from ${JSON.stringify(KNOWN_PROVIDERS)}`);
+  }
+  if (config.preferredStartingProvider !== null && !KNOWN_PROVIDERS.includes(config.preferredStartingProvider)) {
+    problems.push(`preferredStartingProvider must be null or one of ${JSON.stringify(KNOWN_PROVIDERS)}`);
+  }
+  for (const [field, value] of Object.entries({ desktopPollIntervalMs: config.desktopPollIntervalMs, maxConcurrentTasks: config.maxConcurrentTasks, maxHandoffs: config.maxHandoffs, maxAttempts: config.maxAttempts, maxRuntimeMs: config.maxRuntimeMs })) {
+    if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) problems.push(`${field} must be a positive number`);
+  }
+  if (typeof config.logRetentionDays !== "number" || !Number.isFinite(config.logRetentionDays) || config.logRetentionDays < 0) {
+    problems.push("logRetentionDays must be a non-negative number");
+  }
+  if (config.logLevel !== "info" && config.logLevel !== "debug") {
+    problems.push('logLevel must be "info" or "debug"');
+  }
+  if (!Array.isArray(config.validationCommands) || !config.validationCommands.every((c) => typeof c === "string")) {
+    problems.push("validationCommands must be an array of strings");
+  }
+  const policy = config.unknownAvailabilityPolicy;
+  if (typeof policy !== "object" || policy === null || typeof policy.allow !== "boolean" || typeof policy.maxAttempts !== "number" || policy.maxAttempts < 0 || typeof policy.cooldownMs !== "number" || policy.cooldownMs < 0) {
+    problems.push("unknownAvailabilityPolicy must be { allow: boolean, maxAttempts: >=0, cooldownMs: >=0 }");
+  }
+
+  return problems;
+}

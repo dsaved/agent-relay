@@ -30,6 +30,13 @@ This document covers two phases:
   has its own document, [`docs/DESKTOP_INTEGRATION.md`](DESKTOP_INTEGRATION.md).
 - **Phase 4** (persistent macOS background daemon) has its own document,
   [`docs/DAEMON.md`](DAEMON.md).
+- **Phase 5** (setup & integration management) has its own document,
+  [`docs/SETUP.md`](SETUP.md).
+- **Phase 6** (automated setup & NPM packaging) extends that same
+  document and adds [`docs/INSTALLATION.md`](INSTALLATION.md),
+  [`docs/INTEGRATIONS.md`](INTEGRATIONS.md),
+  [`docs/UNINSTALL.md`](UNINSTALL.md), and
+  [`docs/RELEASE.md`](RELEASE.md).
 
 ## Phase 0 Feasibility
 
@@ -687,3 +694,147 @@ npm run lint        # eslint src test — PASS
 npm run build       # tsc — PASS
 npm run test        # tsc build + node --test — PASS (169/169)
 ```
+
+---
+
+## Phase 5 — Setup & Integration Management
+
+Full writeup and the 13-item capability matrix live in
+[`docs/SETUP.md`](SETUP.md). Summary:
+
+- Replaces Phase 3B's manual "copy this JSON snippet into your settings
+  file" instruction with a proper subsystem: `agent-relay setup` detects
+  installed agents, prints every proposed config change, and only
+  applies them after explicit approval (`--yes` or an interactive
+  prompt — never inferred from a piped stdin); `agent-relay integrations
+  status/repair/uninstall` manage the result afterward.
+- A new `src/setup/adapter.ts` interface (`detect`/`plan`/`apply`/
+  `status`/`repair`/`uninstall`) is implemented twice: `ClaudeCodeAdapter`
+  (a real `~/.claude/settings.json` `Stop`-hook integration, with
+  backups, preservation of every unrelated setting, idempotency, and
+  absolute-path commands — all verified directly) and `CodexAdapter`
+  (honestly `not_applicable`, since Codex has no documented hook/config
+  integration point, consistent with every prior phase's findings).
+- **Per the user's explicit instruction, nothing in this phase touched a
+  real Claude/Codex configuration file, and nothing was committed** —
+  every test runs against a `mkdtemp()`-created disposable directory.
+- A dedicated test confirms a `Stop` hook event is recorded as evidence
+  only — it never changes a session's ownership, activity, or any
+  usage-exhaustion state.
+- NPM packaging itself remains explicitly deferred to a later phase, per
+  the user's own instruction.
+- 24 new tests, all against fakes/disposable fixture directories.
+
+### Verification run (Phase 0 + 1A + 1B + 2A + 2B + 2C + 3A + 3B + 4 + 5)
+
+```
+npm run typecheck   # tsc --noEmit — PASS
+npm run lint        # eslint src test — PASS
+npm run build       # tsc — PASS
+npm run test        # tsc build + node --test — PASS (193/193)
+```
+
+---
+
+## Phase 6 — Automated Setup & NPM Packaging
+
+Full writeups live in [`docs/INSTALLATION.md`](INSTALLATION.md),
+[`docs/INTEGRATIONS.md`](INTEGRATIONS.md),
+[`docs/UNINSTALL.md`](UNINSTALL.md), [`docs/RELEASE.md`](RELEASE.md),
+and a new section appended to [`docs/SETUP.md`](SETUP.md). Summary:
+
+- **Packaging**: `package.json` gained `files`/`exports`; `npm pack`
+  contents were verified for real (only `dist/src` + `package.json` ship
+  — no `test/`, no `node_modules`, no `.git`). A real global install
+  from that tarball into an isolated `--prefix` directory was verified,
+  including running the installed binary from a `cwd` outside the
+  source repository.
+- **Setup rounded out**: `agent-relay setup`/`doctor` now open with
+  OS/runtime detection and a subscription-auth check that never reads a
+  credential file (`src/setup/environment.ts`, `src/setup/authCheck.ts`
+  — reusing Phase 0's own already-proven probes). The background daemon
+  is now one more approved `setup` change
+  (`src/setup/daemonAdapter.ts`), stopping at writing the plist file —
+  never calling `launchctl` on its own.
+- **Claude Code integration generalized**: manages `Stop` *and*
+  `SessionEnd` hooks (not just `Stop`), each with a bounded timeout so a
+  stuck receiver can never block a real session; `apply()`/`uninstall()`
+  now also preserve the settings file's original permission mode.
+- **Real launchd activation, never self-invoked**: `agent-relay daemon
+  activate`/`deactivate` (idempotent, injectable `launchctl` runner) plus
+  a single-lifecycle-owner refusal in `daemon start` when launchd already
+  has the service loaded. **No command in any phase of this project has
+  ever invoked the real `launchctl` against this machine's actual
+  launchd** — every test injects a fake runner.
+- **Two genuine concurrency bugs found and fixed**: (1) two concurrent
+  `setup` runs could duplicate a hook — fixed with a small file lock
+  reusing `WorkspaceLockManager`'s own atomic-create-plus-dead-PID-reclaim
+  pattern (`src/setup/fileLock.ts`); (2) two daemons racing to start
+  against the same state directory had a real TOCTOU gap between the
+  friendly pre-check and the actual socket bind — fixed by making
+  `listen()`'s own `EADDRINUSE` the atomic guard, with the pre-check kept
+  only for a clearer error message.
+- **A third, more interesting bug was found by the new end-to-end
+  integration test itself**: if a crash happened in the narrow window
+  after `HandoffEngine.executeHandoff` persisted `destinationProvider`
+  (right after acquiring the workspace lock) but before it ever recorded
+  an attempt, recovery's own follow-on-leg logic
+  (`src/auto/followOnHandoff.ts`) checked the wrong field
+  (`destinationProvider` instead of whether an attempt had actually been
+  recorded) and tried to build a same-provider handoff, which
+  `HandoffEngine` correctly refused — surfacing as a silently-swallowed
+  exception (a second bug: nothing logged a `continueFrom` rejection at
+  all, fixed in `src/daemon/scheduler.ts`). Both are fixed, and the fix
+  is covered by the full pre-existing test suite passing unmodified plus
+  the new integration test passing repeatably.
+- **`agent-relay config show`/`config validate`/`doctor`** — the
+  aggregate health check requirement #6 asks for.
+- **A real, end-to-end integration-lifecycle test**
+  (`test/integrationLifecycle.test.ts`) drives the actual globally-
+  installed binary, from a real `npm pack` tarball, through the complete
+  lifecycle: install → `setup --yes` (with hook/permission/preservation
+  verification against a pre-seeded fixture) → daemon start → submit a
+  task → the submitting CLI process exits → the daemon continues it →
+  pause → resume → a simulated crash (`SIGKILL`) → daemon restart →
+  verified recovery with no duplicate execution → `integrations
+  status`/`doctor` → `integrations uninstall` → verified only this
+  tool's own entries were removed → cleanup of every temporary process
+  and file. The real `codex`/`claude` CLIs are never invoked: `claude` is
+  replaced on `PATH` by a small scripted stand-in (the same role
+  `FakeExecutionAdapter` plays at the library level everywhere else in
+  this suite, just reachable by a real spawned process), and a real
+  `codex` binary, if present on the machine, is deliberately *shadowed*
+  by a fake one rather than relied upon to be absent — so this test can
+  never accidentally make a real, billable or rate-limited call.
+- **Per the user's explicit instruction**: no real `launchctl` call, no
+  write to this machine's actual `~/.claude/settings.json`, no npm
+  publication, and no git commit anywhere in this phase. Automatic
+  handoff from an independently running desktop session remains
+  explicitly stated as not yet fully verified (`docs/INTEGRATIONS.md`).
+- 24 new tests (environment, daemon adapter, launchd activation, config
+  validation, and the one end-to-end integration test), plus two
+  real production-code fixes (not test-only workarounds) found by
+  exercising the system for real for the first time.
+
+### Verification run (Phase 0 + 1A + 1B + 2A + 2B + 2C + 3A + 3B + 4 + 5 + 6)
+
+```
+npm run typecheck     # tsc --noEmit — PASS
+npm run lint          # eslint src test — PASS
+npm run build         # tsc — PASS
+npm run test          # tsc build + node --test — PASS (217/217: 193 pre-existing + 24 new)
+npm pack --dry-run    # confirms tarball contents: dist/src + package.json only
+```
+
+217 tests total: the 193 from Phase 5, unmodified, plus 24 new —
+`test/setupEnvironment.test.ts`, `test/setupDaemonAdapter.test.ts`,
+`test/launchdActivation.test.ts`, `test/daemonConfigValidate.test.ts`,
+`test/integrationLifecycle.test.ts`, and two more added directly to
+`test/setupClaudeAdapter.test.ts` (permission preservation, the
+concurrency-lock race). The integration test was run repeatedly (10+
+consecutive passes) to confirm it's stable, not a one-off — its first
+few runs surfaced both the real recovery bug above and a timing race in
+the test's own ordering (removing a test-controlled sleep gate *after*
+confirming a daemon restart, when crash recovery's background retry can
+reach the fake CLI first) — the second was a test bug, not fixed by
+touching any production code.

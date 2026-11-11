@@ -7,6 +7,10 @@
   "bin": {
     "agent-relay": "dist/src/cli.js"
   },
+  "exports": "./dist/src/cli.js",
+  "files": [
+    "dist/src"
+  ],
   "engines": {
     "node": ">=22"
   },

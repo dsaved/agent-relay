@@ -11,7 +11,8 @@ export function defaultStoreRoot(): string {
   return process.env.AGENT_RELAY_HOME ?? join(homedir(), ".agent-relay");
 }
 
-async function writeJsonAtomic(path: string, data: unknown): Promise<void> {
+/** Exported for Phase 5's setup/integration adapters, which write a user's real config files (e.g. `~/.claude/settings.json`) with the same crash-safety property this store has always used for its own records. */
+export async function writeJsonAtomic(path: string, data: unknown): Promise<void> {
   await mkdir(join(path, ".."), { recursive: true });
   const tmp = `${path}.tmp-${randomBytes(4).toString("hex")}`;
   await writeFile(tmp, JSON.stringify(data, null, 2));

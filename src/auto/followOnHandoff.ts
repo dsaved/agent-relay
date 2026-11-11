@@ -5,11 +5,25 @@ import type { HandoffRecord } from "../handoff/types.js";
 /**
  * Picks the handoff record the coordinator should execute next.
  *
- * - If the current handoff has never been targeted yet
- *   (`destinationProvider === null` — true for leg 1, the record
- *   `handoff prepare` already created), it's reused as-is: no reason to
- *   create a second record for the very first attempt.
- * - Otherwise (this handoff already ran once, successfully or not), a
+ * - If this handoff has never actually recorded an attempt yet
+ *   (`attempts.length === 0`), it's reused as-is — this is still "the
+ *   same leg", whether that's because it's genuinely leg 1 (the record
+ *   `handoff prepare` already created, `destinationProvider` still
+ *   null), or because a prior run of *this exact leg* set
+ *   `destinationProvider` and persisted it (inside
+ *   `HandoffEngine.executeHandoff`, right after acquiring the workspace
+ *   lock) and then crashed before ever reaching `adapter.run()` — a real
+ *   scenario this project's own crash-recovery integration test caught:
+ *   checking `destinationProvider` alone would wrongly treat that as
+ *   "leg 1 already ran," build a *new* record whose synthetic source
+ *   provider is the very provider it's about to be handed back to, and
+ *   `HandoffEngine` would then correctly refuse it as a same-provider
+ *   handoff — not a new leg, just this one, continuing. `executeHandoff`
+ *   itself already tolerates `destinationProvider` matching the
+ *   requested `to` (it only refuses a *different* one), so simply
+ *   reusing the record here is enough.
+ * - Otherwise (an attempt was actually recorded — completed, crashed,
+ *   timed out, whatever), a
  *   fresh `HandoffRecord` is built via Phase 2B's own
  *   `createHandoffRecord()` — re-reading the *current* git state (so
  *   whatever the previous destination actually left behind is captured
@@ -24,8 +38,14 @@ export async function getOrCreateNextLegHandoff(
   currentHandoff: HandoffRecord,
   failureSummary: string | null,
 ): Promise<HandoffRecord> {
-  if (!currentHandoff.destinationProvider) {
+  if (currentHandoff.attempts.length === 0) {
     return currentHandoff;
+  }
+  // An attempt was recorded, so `executeHandoff` must have reached the
+  // point where it sets `destinationProvider` (right at its own start) —
+  // never null here; asserted, not re-guessed.
+  if (!currentHandoff.destinationProvider) {
+    throw new Error(`handoff "${currentHandoff.handoffId}" has a recorded attempt but no destinationProvider — inconsistent state`);
   }
 
   const lastAttempt = currentHandoff.attempts[currentHandoff.attempts.length - 1];

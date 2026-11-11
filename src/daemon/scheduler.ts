@@ -51,7 +51,15 @@ export class TaskScheduler {
   private track(taskId: string, controller: AbortController, promise: Promise<AutoTaskState>): void {
     this.inFlight.set(taskId, { controller, promise });
     void promise
-      .catch(() => undefined) // a rejected continuation must still free the slot; the caller of continueFrom already owns surfacing the error
+      .catch((err: unknown) => {
+        // A rejected continuation must still free the slot below — but an
+        // exception thrown deep inside the coordinator's loop (as opposed
+        // to a normal paused/failed/stopped *outcome*, which never
+        // throws) would otherwise be silently swallowed, leaving the
+        // task's last persisted state looking merely "stuck" with no
+        // record of why. Logged here so it's observable instead.
+        void this.logger?.write("task_lifecycle", { taskId, event: "continuation_threw", error: err instanceof Error ? err.message : String(err) });
+      })
       .finally(() => this.inFlight.delete(taskId));
   }
 

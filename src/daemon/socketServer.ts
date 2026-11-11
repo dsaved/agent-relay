@@ -3,6 +3,7 @@ import { chmod, mkdir, rm } from "node:fs/promises";
 import { dirname } from "node:path";
 import { createInterface } from "node:readline";
 import { encodeMessage, parseRequest, type DaemonResponse } from "./protocol.js";
+import { pingDaemon } from "./client.js";
 
 export type CommandHandler = (args: unknown) => Promise<unknown>;
 
@@ -22,9 +23,21 @@ export class DaemonSocketServer {
     private readonly handlers: Record<string, CommandHandler>,
   ) {}
 
+  /**
+   * Operational-hardening fix #2: two processes racing to start a daemon
+   * for the same state directory could previously both pass a
+   * check-then-`rm()`-then-`listen()` sequence that was not itself
+   * atomic — each might delete the *other's* just-created live socket
+   * file before binding its own. Fixed by making the bind attempt itself
+   * the atomic guard: `listen()` is tried first (a stale or live file at
+   * the path makes it fail with `EADDRINUSE`, same as any POSIX bind
+   * would), and only *after* that failure is the file's liveness checked
+   * — if something really answers, this call fails loudly rather than
+   * stealing a live daemon's socket; only a confirmed-stale file is
+   * removed, and then exactly one retry is made.
+   */
   async start(): Promise<void> {
     await mkdir(dirname(this.socketPath), { recursive: true, mode: 0o700 });
-    await rm(this.socketPath, { force: true });
 
     this.server = createServer((socket) => {
       const rl = createInterface({ input: socket });
@@ -33,11 +46,22 @@ export class DaemonSocketServer {
       });
     });
 
-    await new Promise<void>((resolve, reject) => {
+    try {
+      await this.listenOnce();
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EADDRINUSE") throw err;
+      if (await pingDaemon(this.socketPath, 1_000)) throw err; // a real daemon answers there — never steal its socket
+      await rm(this.socketPath, { force: true }); // confirmed stale — safe to reclaim
+      await this.listenOnce();
+    }
+    await chmod(this.socketPath, 0o600);
+  }
+
+  private listenOnce(): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
       this.server!.once("error", reject);
       this.server!.listen(this.socketPath, resolve);
     });
-    await chmod(this.socketPath, 0o600);
   }
 
   private async handleLine(socket: { write: (data: string) => void }, line: string): Promise<void> {

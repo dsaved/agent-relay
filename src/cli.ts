@@ -24,8 +24,24 @@ import { requestDesktopHandoff } from "./desktop/handoff.js";
 import { formatDesktopSession } from "./desktop/format.js";
 import { callDaemon, pingDaemon, DaemonUnreachableError } from "./daemon/client.js";
 import { defaultSocketPath, runForeground } from "./daemon/process.js";
-import { generateLaunchdPlist, plistPath, launchAgentsDir, DEFAULT_LAUNCHD_LABEL } from "./daemon/launchd.js";
-import { logPath } from "./daemon/log.js";
+import { generateLaunchdPlist, plistPath, launchAgentsDir, DEFAULT_LAUNCHD_LABEL, activate as launchdActivate, deactivate as launchdDeactivate, isLoaded as launchdIsLoaded } from "./daemon/launchd.js";
+import { logPath, redact } from "./daemon/log.js";
+import { loadConfig, validateConfig } from "./daemon/config.js";
+import {
+  defaultAdapters,
+  planSetup,
+  applySetup,
+  statusAll,
+  repairAll,
+  uninstallAll,
+  formatSetupPlan,
+  formatApplyOutcomes,
+  formatStatusAll,
+  formatRepairOutcomes,
+  formatUninstallOutcomes,
+  checkSetupPrerequisites,
+  formatSetupPrerequisites,
+} from "./setup/run.js";
 import type { AutoTaskState } from "./auto/types.js";
 import type { SubmitResult } from "./daemon/scheduler.js";
 
@@ -225,7 +241,11 @@ function exitCodeForAutoState(stateName: string): number {
  */
 async function callDaemonIfRunning(command: string, args: unknown): Promise<{ reachable: true; result: unknown } | { reachable: false }> {
   try {
-    const result = await callDaemon(defaultSocketPath(defaultStoreRoot()), command, args, { timeoutMs: 5_000 });
+    // `autoPause`/`autoStop` can legitimately take as long as `spawnRun`'s
+    // own SIGTERM-then-SIGKILL grace period (src/execution/spawnRun.ts) if
+    // something is genuinely in flight when asked to stop — this timeout
+    // must comfortably exceed that, not just a typical quick round trip.
+    const result = await callDaemon(defaultSocketPath(defaultStoreRoot()), command, args, { timeoutMs: 15_000 });
     return { reachable: true, result };
   } catch (err) {
     if (err instanceof DaemonUnreachableError) return { reachable: false };
@@ -431,14 +451,7 @@ async function daemonInstallCommand(): Promise<{ text: string; exitCode: number 
   await mkdir(launchAgentsDir(), { recursive: true });
   await writeFile(path, plist);
   return {
-    text: [
-      `Wrote ${path}.`,
-      "",
-      "This does NOT load or activate the service — run this yourself when you're ready:",
-      `  launchctl bootstrap gui/$(id -u) ${path}`,
-      "",
-      "To have it also start immediately: add `launchctl kickstart -k gui/$(id -u)/" + DEFAULT_LAUNCHD_LABEL + "` after that.",
-    ].join("\n"),
+    text: [`Wrote ${path}.`, "", "This does NOT load or activate the service — run `agent-relay daemon activate` yourself when you're ready."].join("\n"),
     exitCode: 0,
   };
 }
@@ -447,15 +460,31 @@ async function daemonUninstallCommand(): Promise<{ text: string; exitCode: numbe
   const path = plistPath();
   await rm(path, { force: true });
   return {
-    text: [`Removed ${path} (if it existed).`, "", "If the service was loaded, unload it yourself first or after, with:", `  launchctl bootout gui/$(id -u)/${DEFAULT_LAUNCHD_LABEL}`].join("\n"),
+    text: [`Removed ${path} (if it existed).`, "", "If the service was loaded, unload it first (or after) with `agent-relay daemon deactivate`."].join("\n"),
     exitCode: 0,
   };
 }
 
-/** Spawns the daemon as a detached background process — independent of this terminal session, per requirement #1. Refuses if one is already running for this state directory (the daemon's own single-instance guard would refuse too; checking here just gives a clearer message). */
+/**
+ * Spawns the daemon as a detached background process — independent of
+ * this terminal session, per requirement #1. Refuses if one is already
+ * running for this state directory (the daemon's own single-instance
+ * guard would refuse too; checking here just gives a clearer message).
+ *
+ * Single-lifecycle-owner check (requirement #5): also refuses if launchd
+ * already has this service loaded — that instance's `KeepAlive` means
+ * launchd itself is the one responsible for keeping it running, and
+ * racing a second, manually-started process against that is exactly
+ * what this check exists to prevent. `daemon activate`/`restart` are the
+ * right commands once launchd owns it.
+ */
 async function daemonStartCommand(): Promise<{ text: string; exitCode: number }> {
   const existing = await daemonPingStatus();
   if (existing) return { text: `Already running (pid ${existing.pid}, up ${Math.round(existing.uptimeMs / 1000)}s).`, exitCode: 0 };
+
+  if (await launchdIsLoaded(DEFAULT_LAUNCHD_LABEL)) {
+    return { text: "agent-relay: launchd already manages this daemon (it is loaded, though not currently answering — it may be between restarts). Use `daemon restart` or `launchctl kickstart`, not `daemon start`, to avoid two lifecycle owners for the same state directory.", exitCode: 1 };
+  }
 
   const child = spawn(process.execPath, [resolveCliPath(), "daemon", "run-foreground"], { detached: true, stdio: "ignore" });
   child.unref();
@@ -496,11 +525,36 @@ async function daemonStatusCommand(): Promise<{ text: string; exitCode: number }
   ];
   try {
     await readFile(plistPath(), "utf8");
-    lines.push(`launchd plist installed at: ${plistPath()} (installed ≠ loaded — this does not check \`launchctl list\`)`);
+    const loaded = await launchdIsLoaded(DEFAULT_LAUNCHD_LABEL);
+    lines.push(`launchd plist installed at: ${plistPath()} (${loaded ? "loaded — launchd is the lifecycle owner" : "not currently loaded — run `daemon activate` to load it"})`);
   } catch {
     lines.push("launchd plist: not installed (`agent-relay daemon install` to generate one)");
   }
   return { text: lines.join("\n"), exitCode: existing ? 0 : 1 };
+}
+
+/** Requirement #5: idempotent — a no-op (reported, not an error) when already loaded. Never called automatically by this session against the real system; only ever invoked when the user runs this command themselves after approving `setup`. */
+async function daemonActivateCommand(): Promise<{ text: string; exitCode: number }> {
+  try {
+    await readFile(plistPath(), "utf8");
+  } catch {
+    return { text: "agent-relay: no plist installed yet — run `agent-relay daemon install` (or `setup`) first.", exitCode: 1 };
+  }
+  try {
+    const result = await launchdActivate(plistPath(), DEFAULT_LAUNCHD_LABEL);
+    return { text: result.detail, exitCode: 0 };
+  } catch (err) {
+    return { text: `agent-relay: ${err instanceof Error ? err.message : String(err)}`, exitCode: 1 };
+  }
+}
+
+async function daemonDeactivateCommand(): Promise<{ text: string; exitCode: number }> {
+  try {
+    const result = await launchdDeactivate(DEFAULT_LAUNCHD_LABEL);
+    return { text: result.detail, exitCode: 0 };
+  } catch (err) {
+    return { text: `agent-relay: ${err instanceof Error ? err.message : String(err)}`, exitCode: 1 };
+  }
 }
 
 async function daemonLogsCommand(args: string[]): Promise<{ text: string; exitCode: number }> {
@@ -525,6 +579,102 @@ async function daemonRunForegroundCommand(): Promise<never> {
   return new Promise<never>(() => {
     /* intentionally never resolves — this process exits via the SIGTERM/SIGINT handler installed inside runForeground(), not by returning here */
   });
+}
+
+/** Interactive-only (`--yes` is the non-interactive path): never guesses approval from a piped stdin, since this gates a real config-file write. */
+async function confirmInteractively(promptText: string): Promise<boolean> {
+  if (process.stdin.isTTY !== true) return false;
+  return new Promise((resolve) => {
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    rl.question(`${promptText} [y/N] `, (answer) => {
+      rl.close();
+      resolve(/^y(es)?$/i.test(answer.trim()));
+    });
+  });
+}
+
+/**
+ * Requirements #1/#2/#6: discovers installed agents, prints every
+ * proposed change up front, and only calls `applySetup` after explicit
+ * approval (`--yes` or an interactive yes) — nothing is written if the
+ * plan is empty or isn't approved. Backups/preservation/idempotency are
+ * all properties of the adapters themselves (see src/setup/
+ * claudeCodeAdapter.ts), not this command.
+ */
+async function setupCommand(args: string[]): Promise<{ text: string; exitCode: number }> {
+  const prereqs = await checkSetupPrerequisites(); // requirement #2 steps 1/3: OS/runtime + subscription auth, without reading credentials
+  const summaries = await planSetup(defaultAdapters());
+  const planText = [formatSetupPrerequisites(prereqs), "", formatSetupPlan(summaries)].join("\n");
+  const hasChanges = summaries.some((s) => s.changes.length > 0);
+  if (!hasChanges) return { text: [planText, "", "Nothing to set up."].join("\n"), exitCode: 0 };
+
+  const approved = hasFlag(args, "--yes") || (await confirmInteractively("Apply the changes above?"));
+  if (!approved) return { text: [planText, "", "Not applied (pass --yes, or approve interactively, to proceed)."].join("\n"), exitCode: 0 };
+
+  const outcomes = await applySetup(defaultAdapters(), summaries);
+  // Requirement #2 step 8: verify installation health right after applying, same aggregate check `doctor` exposes on demand.
+  const health = await runDoctor();
+  return { text: [planText, "", formatApplyOutcomes(outcomes), "", "Installation health:", health.text].join("\n"), exitCode: outcomes.some((o) => o.error) ? 1 : 0 };
+}
+
+async function integrationsStatusCommand(): Promise<{ text: string; exitCode: number }> {
+  const statuses = await statusAll(defaultAdapters());
+  return { text: formatStatusAll(statuses), exitCode: 0 };
+}
+
+async function integrationsRepairCommand(): Promise<{ text: string; exitCode: number }> {
+  const outcomes = await repairAll(defaultAdapters());
+  return { text: formatRepairOutcomes(outcomes), exitCode: outcomes.some((o) => o.error) ? 1 : 0 };
+}
+
+async function integrationsUninstallCommand(args: string[]): Promise<{ text: string; exitCode: number }> {
+  const approved = hasFlag(args, "--yes") || (await confirmInteractively("Remove Agent Relay's own integration entries?"));
+  if (!approved) return { text: "Not removed (pass --yes, or approve interactively, to proceed).", exitCode: 0 };
+  const outcomes = await uninstallAll(defaultAdapters());
+  return { text: formatUninstallOutcomes(outcomes), exitCode: outcomes.some((o) => o.error) ? 1 : 0 };
+}
+
+async function configShowCommand(): Promise<{ text: string; exitCode: number }> {
+  const { config, error } = await loadConfig(defaultStoreRoot());
+  const lines = error ? [`warning: ${error}`, ""] : [];
+  lines.push(JSON.stringify(redact(config), null, 2));
+  return { text: lines.join("\n"), exitCode: 0 };
+}
+
+async function configValidateCommand(): Promise<{ text: string; exitCode: number }> {
+  const { config, error } = await loadConfig(defaultStoreRoot());
+  if (error) return { text: `agent-relay: ${error}`, exitCode: 1 };
+  const problems = validateConfig(config);
+  if (problems.length === 0) return { text: "Config is valid.", exitCode: 0 };
+  return { text: ["Config problems found:", ...problems.map((p) => `  - ${p}`)].join("\n"), exitCode: 1 };
+}
+
+/**
+ * Requirement #6's aggregate health check, and requirement #2 step 8's
+ * "verify installation health" — reused by both `agent-relay doctor` and
+ * the end of `setup`. Never mutates anything; every sub-check it calls
+ * (`checkSetupPrerequisites`, `statusAll`, `loadConfig`/`validateConfig`,
+ * the daemon `ping`) already exists and is read-only.
+ */
+async function runDoctor(): Promise<{ text: string; exitCode: number }> {
+  const prereqs = await checkSetupPrerequisites();
+  const daemon = await daemonPingStatus();
+  const statuses = await statusAll(defaultAdapters());
+  const { config, error: configError } = await loadConfig(defaultStoreRoot());
+  const configProblems = configError ? [configError] : validateConfig(config);
+
+  const lines = [
+    formatSetupPrerequisites(prereqs),
+    "",
+    daemon ? `daemon: running (pid ${daemon.pid}, up ${Math.round(daemon.uptimeMs / 1000)}s)` : "daemon: not running",
+    "",
+    formatStatusAll(statuses),
+    "",
+    configProblems.length === 0 ? "config: valid" : `config problems:\n${configProblems.map((p) => `  - ${p}`).join("\n")}`,
+  ];
+
+  const anyBroken = statuses.some((s) => s.entries.some((e) => e.status === "broken")) || configProblems.length > 0;
+  return { text: lines.join("\n"), exitCode: anyBroken ? 1 : 0 };
 }
 
 function printHelp(): void {
@@ -569,9 +719,19 @@ function printHelp(): void {
       "  daemon start                        Spawn the daemon as a detached background process.",
       "  daemon stop                         Ask a running daemon to shut down gracefully.",
       "  daemon restart                      Stop, then start.",
-      "  daemon status                       Report whether a daemon is running and whether a plist is installed.",
+      "  daemon status                       Report whether a daemon is running, and whether/if the plist is loaded by launchd.",
+      "  daemon activate                      launchctl bootstrap the installed plist (idempotent).",
+      "  daemon deactivate                    launchctl bootout the running launchd job (idempotent).",
       "  daemon logs [--date YYYY-MM-DD] [--lines N]",
       "                                       Show structured daemon log lines.",
+      "",
+      "  setup [--yes]                       Detect installed agents, show a plan of config changes, and apply it on approval.",
+      "  integrations status                 Report installed/missing/broken/not-applicable integrations.",
+      "  integrations repair                 Re-apply only what status reports missing/broken.",
+      "  integrations uninstall [--yes]       Remove only Agent Relay's own integration entries (backs up first).",
+      "  config show                         Print the resolved daemon configuration (defaults merged).",
+      "  config validate                     Type/range-check the configuration; reports problems, never crashes.",
+      "  doctor                              One aggregate health check: environment, auth, daemon, integrations, config.",
     ].join("\n"),
   );
 }
@@ -716,6 +876,16 @@ async function main(): Promise<number> {
     console.log(text);
     return exitCode;
   }
+  if (command === "daemon" && subcommand === "activate") {
+    const { text, exitCode } = await daemonActivateCommand();
+    console.log(text);
+    return exitCode;
+  }
+  if (command === "daemon" && subcommand === "deactivate") {
+    const { text, exitCode } = await daemonDeactivateCommand();
+    console.log(text);
+    return exitCode;
+  }
   if (command === "daemon" && subcommand === "logs") {
     const { text, exitCode } = await daemonLogsCommand(rest);
     console.log(text);
@@ -723,6 +893,41 @@ async function main(): Promise<number> {
   }
   if (command === "daemon" && subcommand === "run-foreground") {
     return daemonRunForegroundCommand();
+  }
+  if (command === "setup") {
+    const { text, exitCode } = await setupCommand(subcommand ? [subcommand, ...rest] : rest);
+    console.log(text);
+    return exitCode;
+  }
+  if (command === "integrations" && subcommand === "status") {
+    const { text, exitCode } = await integrationsStatusCommand();
+    console.log(text);
+    return exitCode;
+  }
+  if (command === "integrations" && subcommand === "repair") {
+    const { text, exitCode } = await integrationsRepairCommand();
+    console.log(text);
+    return exitCode;
+  }
+  if (command === "integrations" && subcommand === "uninstall") {
+    const { text, exitCode } = await integrationsUninstallCommand(rest);
+    console.log(text);
+    return exitCode;
+  }
+  if (command === "config" && subcommand === "show") {
+    const { text, exitCode } = await configShowCommand();
+    console.log(text);
+    return exitCode;
+  }
+  if (command === "config" && subcommand === "validate") {
+    const { text, exitCode } = await configValidateCommand();
+    console.log(text);
+    return exitCode;
+  }
+  if (command === "doctor") {
+    const { text, exitCode } = await runDoctor();
+    console.log(text);
+    return exitCode;
   }
   printHelp();
   return command === undefined ? 0 : 1;
