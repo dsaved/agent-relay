@@ -76,3 +76,31 @@ export interface AgentExecutionAdapter {
   readonly provider: SessionProvider;
   run(options: ExecutionRunOptions): Promise<ExecutionResult>;
 }
+
+export interface LiveOpenOptions {
+  cwd: string;
+  instruction: string;
+  /** An existing destination-provider session to continue, when one is known. */
+  resumeSessionId?: string | null;
+}
+
+export interface LiveOpenResult {
+  launched: boolean;
+  /** The actual command run — recorded for audit, never hidden. */
+  command: string[];
+  /** Only set when `resumeSessionId` was passed through — there's no way to learn an id from a detached GUI launch of a brand-new session. */
+  sessionId: string | null;
+  detail: string;
+}
+
+/**
+ * Phase 8's live-app counterpart to `AgentExecutionAdapter`: opens a
+ * visible, human-driven session in the destination's own app instead of
+ * running one headlessly to a captured completion. Not every provider
+ * has an equivalent primitive (see docs/LIVE_HANDOFF.md) — a provider
+ * without one simply has no adapter implementing this interface.
+ */
+export interface LiveOpenAdapter {
+  readonly provider: SessionProvider;
+  open(options: LiveOpenOptions): Promise<LiveOpenResult>;
+}

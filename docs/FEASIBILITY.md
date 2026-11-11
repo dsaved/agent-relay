@@ -904,3 +904,68 @@ npm run test          # tsc build + node --test — PASS (241/241: 217 pre-exist
 241 tests total: the 217 from Phase 6, unmodified, plus 24 new proving
 the N-provider generalization and the Copilot adapters, none of which
 ever spawns a real `copilot -p` prompt.
+
+## Phase 8 — Live App Handoff
+
+Full writeup lives in [`docs/LIVE_HANDOFF.md`](LIVE_HANDOFF.md). Summary:
+
+- **A user-reported gap became a new, additive command**: `handoff
+  execute` is headless by design (it spawns a non-interactive process,
+  captures the result, nothing ever appears in an app), which surprised a
+  user expecting a prepared handoff to show up in Claude Desktop. Rather
+  than change `execute`'s behavior, this phase adds `agent-relay handoff
+  open <handoff-id> --to <claude|codex>` — a separate command that opens a
+  **visible, human-driven** session in the destination's own app.
+- **Grounded in this machine's real `claude --help`/`codex --help`/
+  `copilot --help`** (read-only, nothing executed): Claude's `--desktop`
+  flag genuinely opens the Desktop app on a resumed or brand-new session;
+  Codex has `queue --thread`/`app` but no single primitive that both seeds
+  a message and opens the app for a brand-new thread; Copilot has no
+  session-targeted app-opening or message-queuing primitive at all.
+- **Copilot is honestly left out**: no `LiveOpenAdapter` was built for it
+  — `handoff open --to copilot` is refused by `openHandoffLive` itself
+  (no adapter registered), the same refusal path any future provider
+  without one would hit, not a special-cased string.
+- **New safety model, not a variant of `execute`'s**: the same workspace
+  activity check `execute` already runs still gates every open, but no
+  workspace lock is held — a live app session's completion is
+  human-driven and indefinite, so holding a lock for its duration would
+  block every other guarded operation forever. On success, the workspace
+  is registered via `DesktopRegistry.registerFromHandoff()` (one new
+  method; Phase 3B's registry otherwise unchanged) with
+  `ownershipStatus: "external_active"`, reusing `agent-relay desktop
+  sessions`/`desktop inspect` as the existing way to see it — no new
+  inspection command. `HandoffStatus` gained one new value,
+  `"opened_live"`, confirmed safe to add (never matched in an exhaustive
+  switch anywhere, and `AutomaticHandoffCoordinator` never calls this
+  path).
+- **`src/execution/launchDetached.ts`** is a new, deliberately separate
+  counterpart to `spawnRun.ts` for GUI-launching commands — fire-and-
+  forget, no timeout, no output capture, no process-group kill, since
+  there's nothing to wait for once a window opens. It does wait one short
+  grace period for Node's own async spawn-error event, so a missing CLI
+  binary is never reported as "launched."
+- **Still `UNVERIFIED`**: whether `--desktop` really accepts a prompt
+  together with `--resume`, whether `codex app <path>` auto-attaches to
+  an existing thread for that path, and whether `codex queue` requires
+  the shared app-server daemon already running. A separate, explicit
+  live-verification step follows this phase, same gate every live call in
+  this project's history has gone through.
+- 12 new tests — `test/launchDetached.test.ts`,
+  `test/claudeLiveOpenAdapter.test.ts`, `test/codexLiveOpenAdapter.test.ts`,
+  `test/handoffOpen.test.ts` — all against fakes/injected functions; no
+  real `claude`/`codex`/`copilot` app is ever opened by the test suite.
+
+### Verification run (Phase 0 + 1A + 1B + 2A + 2B + 2C + 3A + 3B + 4 + 5 + 6 + 7 + 8)
+
+```
+npm run typecheck     # tsc --noEmit — PASS
+npm run lint          # eslint src test — PASS
+npm run build         # tsc — PASS
+npm run test          # tsc build + node --test — PASS (253/253: 241 pre-existing + 12 new)
+```
+
+253 tests total: the 241 from Phase 7, unmodified, plus 12 new proving
+the live-open adapters and `openHandoffLive`'s safety model, none of
+which ever opens a real app or spawns a real `claude`/`codex`/`copilot`
+process.

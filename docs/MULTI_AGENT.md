@@ -103,7 +103,7 @@ call in this project's history has gone through.
    (not API-key, not metered) auth path. If either is missing, stop —
    document it in §3 above instead of writing code.
 2. Add the literal to `SessionProvider` (`src/sessions/types.ts`).
-3. Write its three adapters, mirroring the Copilot ones above:
+3. Write its three required adapters, mirroring the Copilot ones above:
    - an `AgentExecutionAdapter` in `src/execution/`, plus an
      `interpretXRun` in `src/execution/outcomeClassifier.ts`.
    - a `UsageMonitor` in `src/<provider>/usageMonitor.ts` — passive
@@ -111,6 +111,13 @@ call in this project's history has gone through.
      Codex does today).
    - an `IntegrationAdapter` in `src/setup/<provider>Adapter.ts`, and an
      auth-status check in `src/setup/authCheck.ts`.
+   - **optional fourth**: a `LiveOpenAdapter` in `src/execution/`
+     (`src/execution/types.ts`; see docs/LIVE_HANDOFF.md) — only if the
+     CLI has a real resume/attach/queue-into-an-existing-session
+     primitive that can open its own app on a specific session. Build it
+     only when a documented primitive exists; otherwise leave it out and
+     `handoff open --to <provider>` stays refused with an honest
+     "no live-open adapter" message, same as Copilot today.
 4. Register it: `ALL_PROVIDERS`/`DEFAULT_CONFIG.enabledProviders` stay
    opt-in (don't add it there), but `KNOWN_PROVIDERS` in
    `src/daemon/config.ts`, the adapter-map construction in

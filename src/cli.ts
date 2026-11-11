@@ -18,9 +18,13 @@ import type { SessionProvider } from "./sessions/types.js";
 import { HandoffStore, defaultStoreRoot } from "./handoff/store.js";
 import { createHandoffRecord } from "./handoff/prepare.js";
 import { HandoffEngine } from "./handoff/engine.js";
+import { openHandoffLive } from "./handoff/openHandoff.js";
 import { formatHandoffRecord, formatTask } from "./handoff/format.js";
 import { AutomaticHandoffCoordinator } from "./auto/coordinator.js";
 import { formatAutoTaskState, formatAutoHistory } from "./auto/format.js";
+import { ClaudeLiveOpenAdapter } from "./execution/claudeLiveOpenAdapter.js";
+import { CodexLiveOpenAdapter } from "./execution/codexLiveOpenAdapter.js";
+import type { LiveOpenAdapter } from "./execution/types.js";
 import { DesktopRegistry, parseHookEvent } from "./desktop/registry.js";
 import { requestDesktopHandoff } from "./desktop/handoff.js";
 import { formatDesktopSession } from "./desktop/format.js";
@@ -217,6 +221,31 @@ async function handoffStatusCommand(handoffId: string | undefined): Promise<{ te
   const handoff = await store.loadHandoff(handoffId);
   if (!handoff) return { text: `No handoff found with id "${handoffId}".`, exitCode: 1 };
   return { text: formatHandoffRecord(handoff), exitCode: 0 };
+}
+
+const LIVE_OPEN_ADAPTERS: Partial<Record<SessionProvider, LiveOpenAdapter>> = { claude: new ClaudeLiveOpenAdapter(), codex: new CodexLiveOpenAdapter() };
+
+/**
+ * Phase 8: opens a live, visible session in the destination's own app
+ * instead of running one headlessly to a captured completion (that's
+ * `handoff execute`). See docs/LIVE_HANDOFF.md for why this is a
+ * separate command, not a flag on `execute`.
+ */
+async function handoffOpenCommand(args: string[]): Promise<{ text: string; exitCode: number }> {
+  const handoffId = args[0];
+  const to = parseFlag(args, "--to");
+  if (!handoffId || !to) return { text: "Usage: agent-relay handoff open <handoff-id> --to <claude|codex> [--objective \"...\"] [--force-open]", exitCode: 1 };
+  if (to !== "claude" && to !== "codex" && to !== "copilot") return { text: `Unknown --to "${to}" (expected "claude", "codex", or "copilot")`, exitCode: 1 };
+
+  try {
+    const result = await openHandoffLive(handoffId, { to, suppliedObjective: parseFlag(args, "--objective"), forceOpenOverride: hasFlag(args, "--force-open") }, { adapters: LIVE_OPEN_ADAPTERS });
+    if (result.blockedReason) return { text: `agent-relay: ${result.blockedReason}`, exitCode: 1 };
+    const lines = [`ran: ${result.openResult!.command.join(" ")}`, result.openResult!.detail, "", formatHandoffRecord(result.handoff)];
+    if (result.desktopRecord) lines.push("", `Registered as desktop session "${result.desktopRecord.sessionId}" — see \`agent-relay desktop inspect ${result.desktopRecord.sessionId}\``);
+    return { text: lines.join("\n"), exitCode: result.openResult!.launched ? 0 : 1 };
+  } catch (err) {
+    return { text: `agent-relay: ${err instanceof Error ? err.message : String(err)}`, exitCode: 1 };
+  }
 }
 
 async function tasksCommand(): Promise<{ text: string; exitCode: number }> {
@@ -715,6 +744,8 @@ function printHelp(): void {
       "  handoff execute <handoff-id> --to <claude|codex> [--objective \"...\"] [--force-lock] [--validate \"cmd\"]...",
       "                                       Run the cross-provider handoff (spawns a real coding-agent session).",
       "  handoff status <handoff-id>         Show a handoff's current state and attempt history.",
+      "  handoff open <handoff-id> --to <claude|codex> [--objective \"...\"] [--force-open]",
+      "                                       Open a live, visible session in the destination's own app instead of running headlessly.",
       "  tasks                                List all recorded tasks.",
       "  task inspect <task-id>              Show a task and all its handoffs.",
       "",
@@ -807,6 +838,11 @@ async function main(): Promise<number> {
   }
   if (command === "handoff" && subcommand === "status") {
     const { text, exitCode } = await handoffStatusCommand(rest[0]);
+    console.log(text);
+    return exitCode;
+  }
+  if (command === "handoff" && subcommand === "open") {
+    const { text, exitCode } = await handoffOpenCommand(rest);
     console.log(text);
     return exitCode;
   }

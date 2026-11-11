@@ -8,7 +8,8 @@ export type HandoffStatus =
   | "completed"
   | "interrupted" // stopped partway (crash/timeout/signal) — resumable
   | "blocked" // refused before execution (exhausted provider, missing objective, lock conflict, inaccessible workspace)
-  | "failed_validation"; // destination provider completed but configured validation commands failed
+  | "failed_validation" // destination provider completed but configured validation commands failed
+  | "opened_live"; // Phase 8: a live, human-driven session was opened in the destination's own app — not captured to completion, see docs/LIVE_HANDOFF.md
 
 export interface ValidationCommandResult {
   command: string;

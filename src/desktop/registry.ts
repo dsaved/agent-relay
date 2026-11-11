@@ -5,6 +5,8 @@ import { WorkspaceLockManager, type ProviderActivitySignal } from "../handoff/lo
 import { defaultCheckProviderActivity } from "../handoff/engine.js";
 import { createHandoffRecord } from "../handoff/prepare.js";
 import { assessDesktopOwnership } from "./ownership.js";
+import type { ActivityStatus } from "../handoff/lock.js";
+import type { HandoffRecord } from "../handoff/types.js";
 import type { DesktopSessionRecord, HookEventPayload } from "./types.js";
 
 export interface DesktopRegistryDeps {
@@ -92,6 +94,37 @@ export class DesktopRegistry {
       associatedTaskId: null,
       ownershipStatus: assessment.state,
       evidence: [{ at: now, source: "desktop register", detail: assessment.reason }],
+      registeredAt: now,
+      updatedAt: now,
+    };
+    await this.store.saveDesktopSession(record);
+    return record;
+  }
+
+  /**
+   * Phase 8's `handoff open` registers the newly-opened live session this
+   * way instead of `register()`, which expects a session this process
+   * already discovered — a brand-new destination session doesn't exist
+   * to discover yet. Keyed by `sessionId` (the destination's own session
+   * id when known, otherwise the handoff's own id as a stand-in so
+   * `desktop inspect <id>` still finds it) with `ownershipStatus:
+   * "external_active"`: Relay hands this workspace to the human/app
+   * immediately, it never holds a lock across a live session's lifetime.
+   */
+  async registerFromHandoff(handoff: HandoffRecord, sessionId: string, originatingApp: string, observedActivity: ActivityStatus, evidenceDetail: string): Promise<DesktopSessionRecord> {
+    const now = Date.now();
+    const record: DesktopSessionRecord = {
+      provider: handoff.destinationProvider ?? handoff.sourceProvider,
+      sessionId,
+      repoRoot: handoff.repoRoot,
+      worktreePath: handoff.worktreePath,
+      originatingApp,
+      objective: handoff.originalTaskObjective ?? "(none recorded)",
+      observedActivity,
+      lastConfirmedActivityAt: now,
+      associatedTaskId: handoff.taskId,
+      ownershipStatus: "external_active",
+      evidence: [{ at: now, source: "handoff open", detail: evidenceDetail }],
       registeredAt: now,
       updatedAt: now,
     };
