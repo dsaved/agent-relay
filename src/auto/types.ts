@@ -76,8 +76,10 @@ export interface AutoTaskState {
   unknownAttemptsByProvider: Partial<Record<SessionProvider, number>>;
   cooldowns: Partial<Record<SessionProvider, ProviderCooldown>>;
   validationCommands: string[];
-  /** Explicit config override: when set, only this provider may ever be selected (used by tests and by a human pinning a direction) — selection logic otherwise picks "the other provider" automatically. */
+  /** Explicit config override: when set, only this provider may ever be selected (used by tests and by a human pinning a direction) — selection logic otherwise picks the next eligible provider from `enabledProviders` automatically. */
   pinnedProvider: SessionProvider | null;
+  /** Every provider this task may ever hand off to, in priority order — defaults to `["codex", "claude"]` for byte-for-byte-identical behavior with every task created before a third provider existed. A provider has to be listed here to ever be selected, pinned or not. */
+  enabledProviders: SessionProvider[];
   /** Set by `selecting_provider`, consumed by `handing_off` in the same leg — which provider was just chosen. */
   pendingDestination: SessionProvider | null;
   failureReason: string | null;

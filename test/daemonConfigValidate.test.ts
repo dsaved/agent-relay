@@ -18,6 +18,10 @@ test("validateConfig: catches an unknown provider, a non-positive limit, and a b
   assert.ok(problems.some((p) => p.includes("logLevel")));
 });
 
+test("validateConfig: 'copilot' is accepted as a known provider, for both enabledProviders and preferredStartingProvider", () => {
+  assert.deepEqual(validateConfig({ ...DEFAULT_CONFIG, enabledProviders: ["codex", "claude", "copilot"], preferredStartingProvider: "copilot" }), []);
+});
+
 test("validateConfig: preferredStartingProvider outside enabledProviders' known set is flagged", () => {
   const problems = validateConfig({ ...DEFAULT_CONFIG, preferredStartingProvider: "gemini" as never });
   assert.ok(problems.some((p) => p.includes("preferredStartingProvider")));

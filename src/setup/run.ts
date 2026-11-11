@@ -1,18 +1,19 @@
 import { ClaudeCodeAdapter } from "./claudeCodeAdapter.js";
 import { CodexAdapter } from "./codexAdapter.js";
+import { CopilotAdapter } from "./copilotAdapter.js";
 import { DaemonLaunchdAdapter } from "./daemonAdapter.js";
 import { checkEnvironment, type EnvironmentCheck } from "./environment.js";
-import { checkClaudeAuthStatus, checkCodexAuthStatus, type AuthStatus } from "./authCheck.js";
+import { checkClaudeAuthStatus, checkCodexAuthStatus, checkCopilotAuthStatus, type AuthStatus } from "./authCheck.js";
 import type { ApplyResult, IntegrationAdapter, IntegrationChange, IntegrationStatus, DetectionResult } from "./adapter.js";
 
 export function defaultAdapters(): IntegrationAdapter[] {
-  return [new ClaudeCodeAdapter(), new CodexAdapter(), new DaemonLaunchdAdapter()];
+  return [new ClaudeCodeAdapter(), new CodexAdapter(), new CopilotAdapter(), new DaemonLaunchdAdapter()];
 }
 
 /** Requirement #2 steps 1/3: OS/runtime + subscription-auth-without-credentials, reported once up front, before any adapter's plan. */
 export async function checkSetupPrerequisites(): Promise<{ environment: EnvironmentCheck; auth: AuthStatus[] }> {
   const environment = checkEnvironment();
-  const auth = await Promise.all([checkClaudeAuthStatus(), checkCodexAuthStatus()]);
+  const auth = await Promise.all([checkClaudeAuthStatus(), checkCodexAuthStatus(), checkCopilotAuthStatus()]);
   return { environment, auth };
 }
 

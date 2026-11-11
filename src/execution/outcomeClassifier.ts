@@ -74,6 +74,47 @@ export function interpretCodexRun(result: SpawnRunResult): Interpreted {
 }
 
 /**
+ * Classifies a `copilot -p --output-format json` run. **Best-effort,
+ * unverified** — this project has not yet captured a real completed or
+ * failed sample of Copilot's JSONL event stream (docs/MULTI_AGENT.md),
+ * so classification deliberately relies only on what's independently
+ * confirmed to exist regardless of event field names: the process's own
+ * exit code and stderr text, matched against the same regexes Codex's
+ * classifier already uses. This never scans raw event JSON for these
+ * patterns (Phase 2C's own history: that produced false positives for
+ * Claude when a field name itself matched) — only `result.stderr`.
+ * `events` is still populated generically by `spawnRun` (every stdout
+ * line that parses as JSON), so nothing about this adapter's output is
+ * lost; a session id is opportunistically read from a `session_id` or
+ * `id` field on any event, best-effort, never required.
+ */
+export function interpretCopilotRun(result: SpawnRunResult): Interpreted {
+  const failure = spawnFailureOutcome(result);
+  if (failure) return failure;
+
+  let sessionId: string | null = null;
+  for (const event of result.events) {
+    const obj = event.raw as { session_id?: unknown; id?: unknown };
+    if (typeof obj.session_id === "string") sessionId = obj.session_id;
+    else if (typeof obj.id === "string" && sessionId === null) sessionId = obj.id;
+  }
+
+  if (result.exitCode === 0) {
+    if (result.events.length === 0) {
+      return { sessionId, outcome: { kind: "invalid_output", detail: "copilot exited 0 but produced no parseable JSON event", cooldownResetsAt: null } };
+    }
+    return { sessionId, outcome: { kind: "completed", detail: null, cooldownResetsAt: null } };
+  }
+
+  const stderr = result.stderr.trim();
+  if (RATE_LIMIT_RE.test(stderr)) return { sessionId, outcome: { kind: "rate_limited", detail: stderr.slice(0, 500), cooldownResetsAt: null } };
+  if (AUTH_RE.test(stderr)) return { sessionId, outcome: { kind: "auth_failed", detail: stderr.slice(0, 500), cooldownResetsAt: null } };
+  if (CONTEXT_RE.test(stderr)) return { sessionId, outcome: { kind: "context_exhausted", detail: stderr.slice(0, 500), cooldownResetsAt: null } };
+  if (PERMISSION_RE.test(stderr)) return { sessionId, outcome: { kind: "permission_required", detail: stderr.slice(0, 500), cooldownResetsAt: null } };
+  return { sessionId, outcome: { kind: "crashed", detail: `copilot exited with code ${result.exitCode}${result.signal ? ` (signal ${result.signal})` : ""}: ${stderr.slice(0, 500)}`, cooldownResetsAt: null } };
+}
+
+/**
  * Classifies a `claude -p --output-format stream-json` run. Unlike
  * Codex, Claude's `rate_limit_event` is structured (see
  * docs/FEASIBILITY.md Phase 1B), so a cooldown timestamp IS extracted

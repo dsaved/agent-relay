@@ -43,6 +43,7 @@ test("coordinator restart during a handoff: a stale lock left by a crashed prior
         cooldowns: {},
         validationCommands: [],
         pinnedProvider: null,
+        enabledProviders: ["codex", "claude"],
         pendingDestination: "codex",
         failureReason: null,
         lastOutcome: null,

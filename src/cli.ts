@@ -7,6 +7,8 @@ import { CodexUsageMonitor } from "./codex/usageMonitor.js";
 import { formatCodexUsageStatus } from "./codex/formatUsage.js";
 import { ClaudeUsageMonitor } from "./claude/usageMonitor.js";
 import { formatClaudeUsageStatus } from "./claude/formatUsage.js";
+import { CopilotUsageMonitor } from "./copilot/usageMonitor.js";
+import { formatCopilotUsageStatus } from "./copilot/formatUsage.js";
 import type { UsageSnapshot } from "./usage/types.js";
 import { discoverAllSessions } from "./sessions/discoverAll.js";
 import { detectWorktreeInfo } from "./sessions/projectAssociation.js";
@@ -80,6 +82,24 @@ async function claudeStatus(): Promise<{ text: string; exitCode: number }> {
   }
 }
 
+/** Same passive-only shape as `claudeStatus` — see src/copilot/usageMonitor.ts on why, and that Copilot's usage-signal field is unverified. */
+async function copilotStatus(): Promise<{ text: string; exitCode: number }> {
+  const monitor = new CopilotUsageMonitor();
+  try {
+    if (!process.stdin.isTTY) {
+      await new Promise<void>((resolve) => {
+        const rl = createInterface({ input: process.stdin });
+        rl.on("line", (line) => monitor.observeLine(line));
+        rl.on("close", resolve);
+      });
+    }
+    const status: UsageSnapshot = await monitor.getStatus();
+    return { text: formatCopilotUsageStatus(status), exitCode: status.error ? 1 : 0 };
+  } finally {
+    await monitor.close();
+  }
+}
+
 function parseFlag(args: string[], name: string): string | undefined {
   const idx = args.indexOf(name);
   return idx >= 0 ? args[idx + 1] : undefined;
@@ -101,8 +121,8 @@ function hasFlag(args: string[], name: string): boolean {
 async function sessionsCommand(args: string[]): Promise<{ text: string; exitCode: number }> {
   const providerFlag = parseFlag(args, "--provider");
   const projectFlag = parseFlag(args, "--project");
-  if (providerFlag && providerFlag !== "claude" && providerFlag !== "codex") {
-    return { text: `Unknown --provider "${providerFlag}" (expected "claude" or "codex")`, exitCode: 1 };
+  if (providerFlag && providerFlag !== "claude" && providerFlag !== "codex" && providerFlag !== "copilot") {
+    return { text: `Unknown --provider "${providerFlag}" (expected "claude", "codex", or "copilot")`, exitCode: 1 };
   }
   const providers: SessionProvider[] = providerFlag ? [providerFlag as SessionProvider] : ["codex", "claude"];
 
@@ -684,7 +704,8 @@ function printHelp(): void {
       "",
       "  usage codex                        Query Codex's account/rateLimits/read directly (no model prompt).",
       "  usage claude                        Report Claude usage observed from piped stream-json input, if any.",
-      "  usage all                           Run both of the above.",
+      "  usage copilot                       Report Copilot usage observed from piped output, if any (unverified signal shape).",
+      "  usage all                           Run all of the above.",
       "",
       "  sessions                            List discovered Codex + Claude sessions (read-only).",
       "  sessions --provider <claude|codex>  Filter by provider.",
@@ -748,13 +769,21 @@ async function main(): Promise<number> {
     console.log(text);
     return exitCode;
   }
+  if (command === "usage" && subcommand === "copilot") {
+    const { text, exitCode } = await copilotStatus();
+    console.log(text);
+    return exitCode;
+  }
   if (command === "usage" && subcommand === "all") {
     const codex = await codexStatus();
     const claude = await claudeStatus();
+    const copilot = await copilotStatus();
     console.log(codex.text);
     console.log("");
     console.log(claude.text);
-    return Math.max(codex.exitCode, claude.exitCode);
+    console.log("");
+    console.log(copilot.text);
+    return Math.max(codex.exitCode, claude.exitCode, copilot.exitCode);
   }
   if (command === "sessions") {
     const { text, exitCode } = await sessionsCommand(subcommand ? [subcommand, ...rest] : rest);

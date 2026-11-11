@@ -1,10 +1,12 @@
 import { CodexUsageMonitor } from "../codex/usageMonitor.js";
 import { ClaudeUsageMonitor } from "../claude/usageMonitor.js";
+import { CopilotUsageMonitor } from "../copilot/usageMonitor.js";
 import { discoverAllSessions } from "../sessions/discoverAll.js";
 import type { SessionAssociation, SessionProvider } from "../sessions/types.js";
 import type { UsageSnapshot } from "../usage/types.js";
 import { CodexExecutionAdapter } from "../execution/codexExecutionAdapter.js";
 import { ClaudeExecutionAdapter } from "../execution/claudeExecutionAdapter.js";
+import { CopilotExecutionAdapter } from "../execution/copilotExecutionAdapter.js";
 import type { AgentExecutionAdapter, ExecutionResult } from "../execution/types.js";
 import { HandoffStore } from "./store.js";
 import { WorkspaceLockManager, type ProviderActivitySignal } from "./lock.js";
@@ -58,6 +60,14 @@ const NO_OWNERSHIP_CHECK: OwnershipVerification = { activityStatus: null, activi
 async function defaultGetUsageStatus(provider: SessionProvider): Promise<UsageSnapshot> {
   if (provider === "codex") {
     const monitor = new CodexUsageMonitor();
+    try {
+      return await monitor.getStatus();
+    } finally {
+      await monitor.close();
+    }
+  }
+  if (provider === "copilot") {
+    const monitor = new CopilotUsageMonitor();
     try {
       return await monitor.getStatus();
     } finally {
@@ -133,7 +143,7 @@ export class HandoffEngine {
   constructor(deps: HandoffEngineDeps = {}) {
     this.store = deps.store ?? new HandoffStore();
     this.lockManager = deps.lockManager ?? new WorkspaceLockManager(this.store);
-    this.adapters = { codex: deps.adapters?.codex ?? new CodexExecutionAdapter(), claude: deps.adapters?.claude ?? new ClaudeExecutionAdapter() };
+    this.adapters = { codex: deps.adapters?.codex ?? new CodexExecutionAdapter(), claude: deps.adapters?.claude ?? new ClaudeExecutionAdapter(), copilot: deps.adapters?.copilot ?? new CopilotExecutionAdapter() };
     this.getUsageStatus = deps.getUsageStatus ?? defaultGetUsageStatus;
     this.checkProviderActivity = deps.checkProviderActivity ?? defaultCheckProviderActivity;
   }

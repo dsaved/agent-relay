@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { CodexUsageMonitor } from "../codex/usageMonitor.js";
 import { ClaudeUsageMonitor } from "../claude/usageMonitor.js";
+import { CopilotUsageMonitor } from "../copilot/usageMonitor.js";
 import { HandoffEngine, defaultCheckProviderActivity } from "../handoff/engine.js";
 import { HandoffStore } from "../handoff/store.js";
 import { WorkspaceLockManager, type ProviderActivitySignal } from "../handoff/lock.js";
@@ -9,7 +10,7 @@ import type { AgentExecutionAdapter } from "../execution/types.js";
 import type { UsageSnapshot } from "../usage/types.js";
 import { assessOwnership } from "./ownership.js";
 import { cooldownFromOutcome, cooldownFromUsageStatus, isOnCooldown } from "./cooldown.js";
-import { otherProvider, selectAlternativeProvider } from "./providerSelection.js";
+import { candidateProviders, selectAlternativeProvider } from "./providerSelection.js";
 import { getOrCreateNextLegHandoff } from "./followOnHandoff.js";
 import type { AutoState, AutoTaskState, AutoTransition } from "./types.js";
 
@@ -26,6 +27,8 @@ export interface StartAutoTaskOptions {
   maxAttempts?: number;
   maxRuntimeMs?: number;
   pinnedProvider?: SessionProvider | null;
+  /** Every provider this task may hand off to, in priority order. Omitted (every caller before a third provider existed) defaults to `["codex", "claude"]` — identical behavior to before this option existed. */
+  enabledProviders?: SessionProvider[];
   /** Phase 4's cooperative-cancellation path — a daemon-held `AbortController.signal`, checked right before and threaded into the destination adapter's `run()`. Omitting it (every Phase 0-3B caller) is identical to today's behavior. */
   signal?: AbortSignal;
 }
@@ -38,6 +41,8 @@ export interface AutomaticHandoffCoordinatorDeps {
   checkProviderActivity?: (workspacePath: string) => Promise<ProviderActivitySignal>;
   /** Fed passively from every real Claude execution's own output — never from a prompt sent solely to check availability (requirement #3). Defaults to one instance kept alive for this coordinator's whole lifetime, so later decisions benefit from earlier observations. */
   claudeUsageMonitor?: ClaudeUsageMonitor;
+  /** Same passive-feeding treatment as `claudeUsageMonitor`, for the same reason (Copilot has no zero-turn usage endpoint either — see docs/MULTI_AGENT.md). */
+  copilotUsageMonitor?: CopilotUsageMonitor;
 }
 
 /**
@@ -59,11 +64,13 @@ export class AutomaticHandoffCoordinator {
   private readonly getUsageStatus: (provider: SessionProvider) => Promise<UsageSnapshot>;
   private readonly checkProviderActivity: (workspacePath: string) => Promise<ProviderActivitySignal>;
   private readonly claudeUsageMonitor: ClaudeUsageMonitor;
+  private readonly copilotUsageMonitor: CopilotUsageMonitor;
 
   constructor(deps: AutomaticHandoffCoordinatorDeps = {}) {
     this.store = deps.store ?? new HandoffStore();
     this.lockManager = deps.lockManager ?? new WorkspaceLockManager(this.store);
     this.claudeUsageMonitor = deps.claudeUsageMonitor ?? new ClaudeUsageMonitor();
+    this.copilotUsageMonitor = deps.copilotUsageMonitor ?? new CopilotUsageMonitor();
     this.checkProviderActivity = deps.checkProviderActivity ?? defaultCheckProviderActivity;
     this.getUsageStatus = deps.getUsageStatus ?? ((provider) => this.defaultGetUsageStatus(provider));
     this.engine = new HandoffEngine({
@@ -77,6 +84,7 @@ export class AutomaticHandoffCoordinator {
 
   private async defaultGetUsageStatus(provider: SessionProvider): Promise<UsageSnapshot> {
     if (provider === "claude") return this.claudeUsageMonitor.getStatus();
+    if (provider === "copilot") return this.copilotUsageMonitor.getStatus();
     const monitor = new CodexUsageMonitor();
     try {
       return await monitor.getStatus();
@@ -152,6 +160,7 @@ export class AutomaticHandoffCoordinator {
       cooldowns: {},
       validationCommands: options.validationCommands ?? [],
       pinnedProvider: options.pinnedProvider ?? null,
+      enabledProviders: options.enabledProviders ?? ["codex", "claude"],
       pendingDestination: null,
       failureReason: null,
       lastOutcome: null,
@@ -175,10 +184,16 @@ export class AutomaticHandoffCoordinator {
     if (!PAUSED_STATES.has(state.state)) return { state, settled: true };
 
     if (state.state === "paused_exhausted") {
-      const candidate = state.pendingDestination ?? (state.currentProvider ? otherProvider(state.currentProvider) : null);
-      const cooldown = candidate ? state.cooldowns[candidate] : undefined;
-      if (candidate && isOnCooldown(cooldown)) {
-        throw new Error(`task "${taskId}" is still on cooldown for ${candidate} until ${new Date(cooldown!.until).toISOString()} (${cooldown!.reason})`);
+      // Resume is refused only when EVERY candidate is still on cooldown —
+      // with more than two enabled providers, one being free is enough for
+      // the real selection logic (inside the loop this resume re-enters)
+      // to pick it; this is just a fast-fail courtesy, not the real check.
+      const candidates = state.pendingDestination ? [state.pendingDestination] : candidateProviders(state.currentProvider!, state.enabledProviders ?? ["codex", "claude"], state.pinnedProvider);
+      const stillBlocked = candidates.length > 0 && candidates.every((c) => isOnCooldown(state.cooldowns[c]));
+      if (stillBlocked) {
+        const first = candidates[0]!;
+        const cooldown = state.cooldowns[first]!;
+        throw new Error(`task "${taskId}" is still on cooldown for ${first} until ${new Date(cooldown.until).toISOString()} (${cooldown.reason})`);
       }
     }
 
@@ -301,6 +316,7 @@ export class AutomaticHandoffCoordinator {
       state.cooldowns,
       state.unknownAvailabilityPolicy,
       state.unknownAttemptsByProvider,
+      state.enabledProviders,
     );
 
     if (selection.decision === "pause_exhausted") {
@@ -341,6 +357,9 @@ export class AutomaticHandoffCoordinator {
 
     if (to === "claude" && result.lastExecutionResult) {
       for (const event of result.lastExecutionResult.events) this.claudeUsageMonitor.observe(event.raw);
+    }
+    if (to === "copilot" && result.lastExecutionResult) {
+      for (const event of result.lastExecutionResult.events) this.copilotUsageMonitor.observe(event.raw);
     }
 
     const next: AutoTaskState = {

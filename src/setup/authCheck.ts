@@ -47,3 +47,21 @@ export function checkCodexAuthStatus(): Promise<AuthStatus> {
     });
   });
 }
+
+/**
+ * **Unverified-by-design**: Copilot CLI's own `--help` (checked live on
+ * this machine, see docs/MULTI_AGENT.md) has no `status`/`whoami`
+ * subcommand — only `login` (which performs a real OAuth flow, not a
+ * read). There is no documented read-only way to answer "is this
+ * already authenticated" without either reading `~/.copilot/` directly
+ * (explicitly out of bounds, same rule as every other provider's
+ * credential files) or attempting an action. Reports `unknown` honestly
+ * rather than guessing from CLI presence alone.
+ */
+export function checkCopilotAuthStatus(): Promise<AuthStatus> {
+  return new Promise((resolve) => {
+    const proc = spawn("copilot", ["--version"], { stdio: "ignore" });
+    proc.once("error", () => resolve({ provider: "copilot", authenticated: false, detail: "copilot CLI was not found on PATH" }));
+    proc.once("exit", (code) => resolve({ provider: "copilot", authenticated: false, detail: code === 0 ? "copilot CLI found, but there is no documented read-only auth-status check — run `copilot login` interactively to confirm" : "copilot --version exited non-zero" }));
+  });
+}

@@ -1,4 +1,12 @@
-export type SessionProvider = "codex" | "claude";
+/**
+ * A literal union, not an open `string` — new agents are added rarely
+ * and deliberately, and a real plugin-loader would be speculative
+ * infrastructure for three (soon) total providers. Adding one more is a
+ * fixed, documented checklist (see docs/MULTI_AGENT.md): implement its
+ * three adapters (execution, usage monitor, setup), add one literal
+ * here, register it in the handful of lists that touch this type.
+ */
+export type SessionProvider = "codex" | "claude" | "copilot";
 
 /**
  * One discovered coding session/thread, as reported by a provider's own

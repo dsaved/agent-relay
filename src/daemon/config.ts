@@ -66,7 +66,7 @@ export async function saveConfig(stateDir: string, config: DaemonConfig): Promis
   await writeFile(configPath(stateDir), JSON.stringify(config, null, 2));
 }
 
-const KNOWN_PROVIDERS: SessionProvider[] = ["codex", "claude"];
+const KNOWN_PROVIDERS: SessionProvider[] = ["codex", "claude", "copilot"];
 
 /**
  * `agent-relay config validate` — deliberately stricter than `loadConfig`'s

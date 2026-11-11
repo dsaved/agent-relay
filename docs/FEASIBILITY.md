@@ -838,3 +838,69 @@ the test's own ordering (removing a test-controlled sleep gate *after*
 confirming a daemon restart, when crash recovery's background retry can
 reach the fake CLI first) — the second was a test bug, not fixed by
 touching any production code.
+
+## Phase 7 — Multi-Agent Support (beyond Codex/Claude)
+
+Full writeup lives in [`docs/MULTI_AGENT.md`](MULTI_AGENT.md). Summary:
+
+- **`SessionProvider` generalized from a hardcoded pair to a 3-literal
+  union** (`"codex" | "claude" | "copilot"`), with the real behavioral
+  change isolated to one new function: `candidateProviders(current,
+  enabled, pinned)` in `src/auto/providerSelection.ts`, which
+  `selectAlternativeProvider` now walks in order instead of assuming
+  exactly one alternative exists. Proven genuinely N-way (not
+  Copilot-specific) with a fourth *fake* provider in
+  `test/providerSelectionGeneralized.test.ts`; the 2-provider case is
+  unchanged, confirmed by the full pre-existing suite passing
+  unmodified.
+- **GitHub Copilot CLI wired up as a real third provider** — execution
+  adapter (`src/execution/copilotExecutionAdapter.ts`), passive usage
+  monitor (`src/copilot/usageMonitor.ts`), and setup/integration adapter
+  (`src/setup/copilotAdapter.ts`), all grounded in this machine's real
+  `copilot --help`/`sessions --help`/`login --help`/`help billing`
+  output (read-only, no prompt sent — v1.0.109). `enabledProviders`
+  defaults to `["codex", "claude"]` everywhere, so Copilot is opt-in for
+  every existing install, never silently activated.
+- **Two latent routing bugs found and fixed before they could ship**:
+  both `HandoffEngine`'s and `AutomaticHandoffCoordinator`'s
+  `defaultGetUsageStatus` used an `if (provider === "claude") ... else
+  codex` pattern that would have silently misrouted any new provider's
+  usage checks to the wrong monitor the moment `"copilot"` became a
+  valid `SessionProvider` value. Fixed with explicit per-provider
+  branches before any such code could ship.
+- **Session discovery is honestly `UNSUPPORTED` for Copilot**: `copilot
+  sessions` has only an `import` subcommand, no `list`/`--json`
+  enumeration — `discoverAllSessions` reports this as an explicit error
+  rather than silently returning nothing. Copilot can still be a
+  handoff *destination*.
+- **Still `UNVERIFIED`**: the exact JSON event shape `copilot
+  --output-format json` emits for a real run. `interpretCopilotRun`
+  classifies best-effort today; confirming the real shape needs one
+  bounded live `copilot -p` prompt, which is a separate, explicit ask
+  not made during this phase.
+- **Windsurf/Devin, Kiro, and Kilo Code investigated and explicitly not
+  built**: Windsurf's billing reportedly moved to credit-based ACUs
+  under Cognition and needs its own feasibility check; Kiro's
+  documented headless auth is an API key, conflicting with this
+  project's no-API-keys rule; Kilo Code is BYOK/metered. All three, and
+  what would need to be true for each to become eligible, are recorded
+  in `docs/MULTI_AGENT.md`.
+- 24 new tests — `test/providerSelectionGeneralized.test.ts`,
+  `test/copilotUsageMonitor.test.ts`, `test/setupCopilotAdapter.test.ts`,
+  one new case in `test/daemonConfigValidate.test.ts`, and one field
+  added to an existing hand-constructed fixture in
+  `test/autoCoordinatorRestart.test.ts` — no real `copilot -p` prompt
+  sent in any of them.
+
+### Verification run (Phase 0 + 1A + 1B + 2A + 2B + 2C + 3A + 3B + 4 + 5 + 6 + 7)
+
+```
+npm run typecheck     # tsc --noEmit — PASS
+npm run lint          # eslint src test — PASS
+npm run build         # tsc — PASS
+npm run test          # tsc build + node --test — PASS (241/241: 217 pre-existing + 24 new)
+```
+
+241 tests total: the 217 from Phase 6, unmodified, plus 24 new proving
+the N-provider generalization and the Copilot adapters, none of which
+ever spawns a real `copilot -p` prompt.
